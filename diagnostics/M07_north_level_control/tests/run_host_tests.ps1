@@ -1,0 +1,29 @@
+param([string]$Compiler = 'C:\Strawberry\c\bin\g++.exe')
+$ErrorActionPreference = 'Stop'
+$projectPath = Split-Path -Parent $PSScriptRoot
+Push-Location -LiteralPath $projectPath
+try {
+    New-Item -ItemType Directory -Force -Path '.pio\host_tests' | Out-Null
+    & $Compiler -std=c++11 -Wall -Wextra -Werror -pedantic -I tests/stubs tests/control_math_test.cpp -o .pio/host_tests/math.exe
+    if ($LASTEXITCODE -ne 0) { throw 'M07 math test compilation failed' }
+    & '.pio\host_tests\math.exe'
+    if ($LASTEXITCODE -ne 0) { throw 'M07 math tests failed' }
+    & $Compiler -std=c++11 -Wall -Wextra -Werror -pedantic -Wno-unused-variable -DM07_HOST_TEST -I tests/stubs tests/watchdog_test.cpp -o .pio/host_tests/watchdog.exe
+    if ($LASTEXITCODE -ne 0) { throw 'M07 watchdog test compilation failed' }
+    & '.pio\host_tests\watchdog.exe'
+    if ($LASTEXITCODE -ne 0) { throw 'M07 watchdog tests failed' }
+    & $Compiler -std=c++11 -Wall -Wextra -Werror -pedantic -DM07_HOST_TEST -I tests/stubs -I ../../firmware/include tests/north_level_integration_test.cpp -o .pio/host_tests/integration.exe
+    if ($LASTEXITCODE -ne 0) { throw 'M07 integration test compilation failed' }
+    $scenarios = @('normal', 'wrap_positive', 'wrap_negative', 'accuracy_brief', 'accuracy_repeated',
+        'accuracy_sustained', 'baseline_low', 'baseline_intermittent', 'brief_gap', 'stale_gap', 'blocked_bno',
+        'fresh_after_stop', 'reset', 'reset_in_poll', 'startup_reset', 'invalid_vector', 'wrong_report',
+        'abort', 'startup_abort', 'wrong_direction', 'runaway', 'yaw_guard_positive', 'yaw_guard_negative',
+        'pitch_guard_positive', 'pitch_guard_negative', 'no_probe_progress', 'no_slew_progress',
+        'overall_timeout', 'braking_timeout', 'burst_timeout', 'move_rejected', 'yaw_slew_rejected',
+        'pitch_slew_rejected', 'blocked_uart', 'frozen_feedback', 'settle_running', 'low_gain', 'first_test',
+        'axis_init', 'report_init')
+    foreach ($scenario in $scenarios) {
+        & '.pio\host_tests\integration.exe' $scenario
+        if ($LASTEXITCODE -ne 0) { throw "M07 integration scenario failed: $scenario" }
+    }
+} finally { Pop-Location }
