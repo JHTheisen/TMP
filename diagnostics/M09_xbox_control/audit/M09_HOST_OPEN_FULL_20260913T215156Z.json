@@ -1,0 +1,327 @@
+{
+  "label": "M09_HOST_OPEN_FULL",
+  "started_utc": "20260913T215156Z",
+  "port": "COM9",
+  "reset": "none",
+  "open_lines": "host-default",
+  "seconds": 35.0,
+  "hardware_capture": true,
+  "boot_banners": [
+    {
+      "at": 0.719,
+      "line": "M09_xbox_control: host Xbox velocity commands; preserved M08 startup and POSE/MOVE"
+    }
+  ],
+  "first_accuracy_seconds": {
+    "0": 1.172
+  },
+  "state_samples": 27,
+  "readiness": [
+    {
+      "at": 21.188,
+      "line": "PITCH-ONLY READY: stable fresh pitch; calibrated north unavailable, yaw disabled. MOVE 0 <pitch_delta_deg> 0; POSE <current_heading_deg> 0 0 levels pitch. Reset for calibrated north startup."
+    }
+  ],
+  "last_state": {
+    "at": 20.719,
+    "phase": "BASELINE",
+    "heading": "3.565",
+    "yaw_error": "0.000",
+    "pitch": "6.559",
+    "pitch_error": "0.000",
+    "yaw_mode": "PROBE",
+    "pitch_mode": "PRECISION",
+    "yaw_motor": "IDLE",
+    "pitch_motor": "IDLE",
+    "concurrent": "NO",
+    "yaw_hz": "0.0",
+    "pitch_hz": "0.0",
+    "yaw_dps": "0.00",
+    "pitch_dps": "0.00",
+    "brake_deg": "0.00/0.00",
+    "BNO_fresh": "YES",
+    "age_ms": "0",
+    "max_gap_ms": "0",
+    "accuracy": "0",
+    "accuracy_low_ms": "0",
+    "north_usable": "NO"
+  },
+  "status_poll": true,
+  "status_replies": [
+    {
+      "at": 1.156,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 1.156,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 1.547,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 2.047,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 2.563,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 3.063,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 3.563,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 4.063,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 4.563,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 5.11,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 5.625,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 6.141,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 6.688,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 7.188,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 7.688,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 8.188,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 8.688,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 9.188,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 9.688,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 10.188,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 10.703,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 11.188,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 11.703,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 12.203,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 12.703,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 13.203,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 13.703,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 14.203,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 14.703,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 15.203,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 15.703,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 16.203,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 16.766,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 17.281,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 17.844,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 18.344,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 18.844,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 19.406,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 19.906,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 20.406,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 20.906,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 21.453,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 22.016,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 22.5,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 23.016,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 23.516,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 24.016,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 24.516,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 25.016,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 25.516,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 26.016,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 26.516,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 27.016,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 27.516,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 28.016,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 28.516,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 29.078,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 29.578,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 30.078,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 30.578,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 31.078,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 31.578,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 32.094,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 32.594,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 33.094,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 33.594,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 34.094,
+      "line": "M09 BUSY"
+    },
+    {
+      "at": 34.594,
+      "line": "M09 BUSY"
+    }
+  ],
+  "limitation": "Stock firmware stops STATE telemetry after readiness/abort; absent later samples do not prove accuracy stayed low.",
+  "exit_abort_sent": true,
+  "exit_response": "=== MILESTONE 9 PRESERVED M08 NORTH / LEVEL SUMMARY ===\nBNO heading_deg=3.550 accuracy=0 north_usable=NO\nTarget heading_deg=3.559 pitch_deg=6.566; baseline heading/pitch=0.000/6.559\nYAW settled=NO error_deg=0.000 bursts=0\nPITCH settled=NO error_deg=0.000 bursts=0\nSlew starts yaw/pitch=0/0\nCARRIAGE position/target_steps=0/0\nTiming estimate pulses_per_deg yaw/pitch=0.000/0.000\nSimultaneous two-axis motion occurred=NO\nSimultaneous three-axis motion observed=NO\nBoth axes reached and settled=NO\nBNO fresh/invalid/resets/report_failures/write_failures=3373/0/1/0/0\nMaximum BNO acquisition_gap_ms=0\nBNO accuracy low episodes/recoveries/longest_ms=0/0/0\nIndependent BNO stale watchdog tripped=NO\nReason: Operator X abort\nFINAL RESULT: FAIL\nLatched abort; reset required. X/x aborts without automatic retry."
+}

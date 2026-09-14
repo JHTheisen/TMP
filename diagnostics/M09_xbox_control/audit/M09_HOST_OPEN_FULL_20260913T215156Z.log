@@ -1,0 +1,207 @@
+# {"label": "M09_HOST_OPEN_FULL", "started_utc": "20260913T215156Z", "port": "COM9", "reset": "none", "open_lines": "host-default", "seconds": 35.0, "hardware_capture": true, "boot_banners": [], "first_accuracy_seconds": {}, "state_samples": 0, "readiness": [], "last_state": null, "status_poll": true, "status_replies": [], "limitation": "Stock firmware stops STATE telemetry after readiness/abort; absent later samples do not prove accuracy stayed low."}
+0.000 # TX STATUS
+0.000 ets Jul 29 2019 12:21:46
+0.000 rst:0x1 (POWERON_RESET),boot:0x17 (SPI_FAST_FLASH_BOOT)
+0.016 configsip: 0, SPIWP:0xee
+0.016 clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+0.016 mode:DIO, clock div:2
+0.016 load:0x3fff0030,len:1184
+0.016 load:0x40078000,len:13232
+0.016 load:0x40080400,len:3028
+0.031 entry 0x400805e4
+0.531 # TX STATUS
+0.719 M09_xbox_control: host Xbox velocity commands; preserved M08 startup and POSE/MOVE
+0.719 Yaw DIR32/STEP33; pitch DIR26/STEP12; carriage DIR21/STEP22; BNO085 Bus B SDA4/SCL5 address 0x4A
+0.735 Physical PITCH feedback = BNO ROLL; pitch targets and telemetry use roll degrees.
+0.735 Carriage zero is startup step count only; units are STEPS, not mm. Software envelope +/-500 steps; no homing.
+0.750 North requires calibrated baseline and BNO accuracy >=2; low accuracy stops yaw operations. Independent 150 ms stale stop for all motion.
+0.766 Stable fresh pitch can enter PITCH-ONLY READY after north-baseline timeout, regardless of accuracy. No automatic fallback motion.
+0.766 Yaw trial sign=-1; current pitch sign=-1
+0.781 X/x aborts; yaw may take up to 180 deg shortest path to north. Clear the intended path and cables.
+0.781 Measured yaw guard +/-185 deg from continuous north target; pitch absolute guard +/-75 deg. Power removal is emergency stop.
+0.797 Slew yaw/pitch Hz=1000/600 accel=1000/600
+0.797 Approach yaw/pitch deg=4.00/2.00 plus measured-rate braking margin. Continuous slew then stopped precision corrections.
+1.047 # TX STATUS
+1.156 M09 BUSY
+1.156 M09 BUSY
+1.172 STATE STARTUP heading=0.000 yaw_error=0.000 pitch=0.000 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=NO age_ms=4 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+1.547 # TX STATUS
+1.547 M09 BUSY
+1.922 STATE STARTUP heading=3.522 yaw_error=0.000 pitch=6.280 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=0 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+2.047 # TX STATUS
+2.047 M09 BUSY
+2.547 # TX STATUS
+2.563 M09 BUSY
+2.688 STATE STARTUP heading=3.503 yaw_error=0.000 pitch=6.461 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=0 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+3.047 # TX STATUS
+3.063 M09 BUSY
+3.438 STATE STARTUP heading=3.514 yaw_error=0.000 pitch=6.538 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=3 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+3.563 # TX STATUS
+3.563 M09 BUSY
+4.063 # TX STATUS
+4.063 M09 BUSY
+4.188 STATE STARTUP heading=3.508 yaw_error=0.000 pitch=6.588 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=0 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+4.563 # TX STATUS
+4.563 M09 BUSY
+4.938 STATE STARTUP heading=3.507 yaw_error=0.000 pitch=6.608 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=3 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+5.110 # TX STATUS
+5.110 M09 BUSY
+5.610 # TX STATUS
+5.625 M09 BUSY
+5.688 STATE STARTUP heading=3.515 yaw_error=0.000 pitch=6.601 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=0 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+6.141 # TX STATUS
+6.141 M09 BUSY
+6.438 STATE BASELINE heading=3.533 yaw_error=0.000 pitch=6.631 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=0 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+6.688 # TX STATUS
+6.688 M09 BUSY
+7.188 # TX STATUS
+7.188 STATE BASELINE heading=3.538 yaw_error=0.000 pitch=6.602 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=3 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+7.188 M09 BUSY
+7.688 # TX STATUS
+7.688 M09 BUSY
+7.938 STATE BASELINE heading=3.538 yaw_error=0.000 pitch=6.581 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=0 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+8.188 # TX STATUS
+8.188 M09 BUSY
+8.688 # TX STATUS
+8.688 STATE BASELINE heading=3.544 yaw_error=0.000 pitch=6.573 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=0 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+8.688 M09 BUSY
+9.188 # TX STATUS
+9.188 M09 BUSY
+9.438 STATE BASELINE heading=3.544 yaw_error=0.000 pitch=6.580 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=0 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+9.688 # TX STATUS
+9.688 M09 BUSY
+10.188 # TX STATUS
+10.188 STATE BASELINE heading=3.544 yaw_error=0.000 pitch=6.587 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=0 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+10.188 M09 BUSY
+10.688 # TX STATUS
+10.703 M09 BUSY
+10.953 STATE BASELINE heading=3.545 yaw_error=0.000 pitch=6.587 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=0 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+11.188 # TX STATUS
+11.188 M09 BUSY
+11.688 # TX STATUS
+11.703 STATE BASELINE heading=3.544 yaw_error=0.000 pitch=6.587 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=0 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+11.703 M09 BUSY
+12.188 # TX STATUS
+12.203 M09 BUSY
+12.453 STATE BASELINE heading=3.544 yaw_error=0.000 pitch=6.587 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=0 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+12.688 # TX STATUS
+12.703 M09 BUSY
+13.188 # TX STATUS
+13.203 STATE BASELINE heading=3.545 yaw_error=0.000 pitch=6.581 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=1 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+13.203 M09 BUSY
+13.688 # TX STATUS
+13.703 M09 BUSY
+13.953 STATE BASELINE heading=3.545 yaw_error=0.000 pitch=6.587 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=0 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+14.188 # TX STATUS
+14.203 M09 BUSY
+14.688 # TX STATUS
+14.703 STATE BASELINE heading=3.544 yaw_error=0.000 pitch=6.587 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=0 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+14.703 M09 BUSY
+15.203 # TX STATUS
+15.203 M09 BUSY
+15.453 STATE BASELINE heading=3.543 yaw_error=0.000 pitch=6.587 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=3 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+15.703 # TX STATUS
+15.703 M09 BUSY
+16.203 # TX STATUS
+16.203 STATE BASELINE heading=3.543 yaw_error=0.000 pitch=6.586 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=0 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+16.203 M09 BUSY
+16.766 # TX STATUS
+16.766 M09 BUSY
+16.953 STATE BASELINE heading=3.543 yaw_error=0.000 pitch=6.586 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=0 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+17.281 # TX STATUS
+17.281 M09 BUSY
+17.703 STATE BASELINE heading=3.544 yaw_error=0.000 pitch=6.587 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=3 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+17.828 # TX STATUS
+17.844 M09 BUSY
+18.344 # TX STATUS
+18.344 M09 BUSY
+18.469 STATE BASELINE heading=3.557 yaw_error=0.000 pitch=6.565 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=0 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+18.844 # TX STATUS
+18.844 M09 BUSY
+19.219 STATE BASELINE heading=3.557 yaw_error=0.000 pitch=6.544 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=0 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+19.406 # TX STATUS
+19.406 M09 BUSY
+19.906 # TX STATUS
+19.906 M09 BUSY
+19.969 STATE BASELINE heading=3.564 yaw_error=0.000 pitch=6.544 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=0 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+20.406 # TX STATUS
+20.406 M09 BUSY
+20.719 STATE BASELINE heading=3.565 yaw_error=0.000 pitch=6.559 pitch_error=0.000 yaw_mode=PROBE pitch_mode=PRECISION yaw_motor=IDLE pitch_motor=IDLE concurrent=NO yaw_hz=0.0 pitch_hz=0.0 yaw_dps=0.00 pitch_dps=0.00 brake_deg=0.00/0.00 BNO_fresh=YES age_ms=0 max_gap_ms=0 accuracy=0 accuracy_low_ms=0 north_usable=NO
+20.906 # TX STATUS
+20.906 M09 BUSY
+21.188 PITCH-ONLY READY: stable fresh pitch; calibrated north unavailable, yaw disabled. MOVE 0 <pitch_delta_deg> 0; POSE <current_heading_deg> 0 0 levels pitch. Reset for calibrated north startup.
+21.453 # TX STATUS
+21.453 M09 BUSY
+22.000 # TX STATUS
+22.016 M09 BUSY
+22.500 # TX STATUS
+22.500 M09 BUSY
+23.000 # TX STATUS
+23.016 M09 BUSY
+23.516 # TX STATUS
+23.516 M09 BUSY
+24.016 # TX STATUS
+24.016 M09 BUSY
+24.516 # TX STATUS
+24.516 M09 BUSY
+25.016 # TX STATUS
+25.016 M09 BUSY
+25.516 # TX STATUS
+25.516 M09 BUSY
+26.016 # TX STATUS
+26.016 M09 BUSY
+26.516 # TX STATUS
+26.516 M09 BUSY
+27.016 # TX STATUS
+27.016 M09 BUSY
+27.516 # TX STATUS
+27.516 M09 BUSY
+28.016 # TX STATUS
+28.016 M09 BUSY
+28.516 # TX STATUS
+28.516 M09 BUSY
+29.063 # TX STATUS
+29.078 M09 BUSY
+29.563 # TX STATUS
+29.578 M09 BUSY
+30.078 # TX STATUS
+30.078 M09 BUSY
+30.578 # TX STATUS
+30.578 M09 BUSY
+31.078 # TX STATUS
+31.078 M09 BUSY
+31.578 # TX STATUS
+31.578 M09 BUSY
+32.078 # TX STATUS
+32.094 M09 BUSY
+32.594 # TX STATUS
+32.594 M09 BUSY
+33.094 # TX STATUS
+33.094 M09 BUSY
+33.594 # TX STATUS
+33.594 M09 BUSY
+34.094 # TX STATUS
+34.094 M09 BUSY
+34.594 # TX STATUS
+34.594 M09 BUSY
+36.047 # TX X; exit response follows
+
+=== MILESTONE 9 PRESERVED M08 NORTH / LEVEL SUMMARY ===
+BNO heading_deg=3.550 accuracy=0 north_usable=NO
+Target heading_deg=3.559 pitch_deg=6.566; baseline heading/pitch=0.000/6.559
+YAW settled=NO error_deg=0.000 bursts=0
+PITCH settled=NO error_deg=0.000 bursts=0
+Slew starts yaw/pitch=0/0
+CARRIAGE position/target_steps=0/0
+Timing estimate pulses_per_deg yaw/pitch=0.000/0.000
+Simultaneous two-axis motion occurred=NO
+Simultaneous three-axis motion observed=NO
+Both axes reached and settled=NO
+BNO fresh/invalid/resets/report_failures/write_failures=3373/0/1/0/0
+Maximum BNO acquisition_gap_ms=0
+BNO accuracy low episodes/recoveries/longest_ms=0/0/0
+Independent BNO stale watchdog tripped=NO
+Reason: Operator X abort
+FINAL RESULT: FAIL
+Latched abort; reset required. X/x aborts without automatic retry.
+

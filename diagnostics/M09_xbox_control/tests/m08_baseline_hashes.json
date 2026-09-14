@@ -1,0 +1,94 @@
+[
+    {
+        "Path":  ".gitignore",
+        "Hash":  "D952ABF002D5E1EC80C8AB1BFC9F38EB5B62FC310667D501CB2CE9F21C3EFFB2"
+    },
+    {
+        "Path":  "platformio.ini",
+        "Hash":  "1C6856DCA1D8A2E1710059DF55E38B41341026C8A375F7F34416CA3E9AA0C0F5"
+    },
+    {
+        "Path":  "README.md",
+        "Hash":  "BF542798D361B6A6AD742FFFDBD8B876E2FB38F5BFE002FB0F6EB208503AF2F0"
+    },
+    {
+        "Path":  "VALIDATION.md",
+        "Hash":  "8D74CB183B9B9B30042FCAC3469469B698C555D92E0E72A6C3F957E0D4ED7902"
+    },
+    {
+        "Path":  ".vscode\\c_cpp_properties.json",
+        "Hash":  "97101949B40CBECC3B88EBA9213F6C5CBAEA059D459DDB1D1FE0ACB372882DE4"
+    },
+    {
+        "Path":  ".vscode\\extensions.json",
+        "Hash":  "31CC8F05084D96B65BE8F147533017C7A1B89B055D85886A2E4AB3CE532F34FB"
+    },
+    {
+        "Path":  ".vscode\\launch.json",
+        "Hash":  "AE89D581049DB206C0FC6581C32FE4B1D01810767CB4B7BE9F8471EF45E736B3"
+    },
+    {
+        "Path":  "src\\control_math.h",
+        "Hash":  "1FE1FC9A8E6526814BAD84F0D8001FD1D8A4C34CB434BA422BF5466703BDF042"
+    },
+    {
+        "Path":  "src\\main.cpp",
+        "Hash":  "17F72D0450635C103850A265E50807C369D7365098BA4B18DC656FD6E344086C"
+    },
+    {
+        "Path":  "src\\motion_watchdog.h",
+        "Hash":  "DC3FD8D85BC0287096E5818E6073AB83E252F37187F16D601D02F2F84F7ED9A3"
+    },
+    {
+        "Path":  "src\\pose_math.h",
+        "Hash":  "08E35E3A66EB2819D91E97CE3622D985D117F5CFE2FDA814A60B5D8DFA9AA559"
+    },
+    {
+        "Path":  "src\\sensor_support.h",
+        "Hash":  "6527419E5ABBE8182A59348AC0189BD74C32C1986714EBF1B5B6D1F9CD8D00FE"
+    },
+    {
+        "Path":  "tests\\control_math_test.cpp",
+        "Hash":  "C9A902B36A2EB588863287E0266DF0839A4A93A09D15864049683811C40684A1"
+    },
+    {
+        "Path":  "tests\\m08_pose_integration_test.cpp",
+        "Hash":  "8FA862D2B6308C328A35164859A510CA7FFD1A037314CEC71D0619D35A5B90F5"
+    },
+    {
+        "Path":  "tests\\north_level_integration_test.cpp",
+        "Hash":  "824A0B6A995E51B03FD09D70FFE5881176A346C80BE68540C9520C27F9C2AE2F"
+    },
+    {
+        "Path":  "tests\\pitch_readiness_test.cpp",
+        "Hash":  "6835AC623A6EE3A4A4DE2E908BF752EE5D45F5F0678183153DE605E94C0317F8"
+    },
+    {
+        "Path":  "tests\\pose_math_test.cpp",
+        "Hash":  "C47354980F65864EF6B740E0976F62A128ADDDAE2921E72EC482469BAF906FB4"
+    },
+    {
+        "Path":  "tests\\run_host_tests.ps1",
+        "Hash":  "B49F4BFB9058B1EE2627C01BAA4855AFCE0A378D0A467578DAEA9E6471D96439"
+    },
+    {
+        "Path":  "tests\\watchdog_test.cpp",
+        "Hash":  "5646AD4575C616D2785FD4276AEDF5EB41D4A484E66036360AD0C5E0E22916ED"
+    },
+    {
+        "Path":  "tests\\stubs\\Adafruit_BNO08x.h",
+        "Hash":  "1368ABF3C820F196BFCE27BB6B42C1877FA43CFE24278DFC28208B3F23D88BDF"
+    },
+    {
+        "Path":  "tests\\stubs\\Arduino.h",
+        "Hash":  "E5B9F49B08AC728981719A69F32D052432B08895AC8F6730EB200763ECD09221"
+    },
+    {
+        "Path":  "tests\\stubs\\FastAccelStepper.h",
+        "Hash":  "FB4296C4FA2EE4797A1D2309B44AFB70156AAD34423D26B8A7BB34AF71344E13"
+    },
+    {
+        "Path":  "tests\\stubs\\Wire.h",
+        "Hash":  "182C64B47ECF7EF1631633F2198E5772BA11CBBD594FA31BB6782377783FC479"
+    }
+]

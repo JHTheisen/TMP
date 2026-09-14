@@ -1,0 +1,47 @@
+{
+  "label": "M09_OBSERVE",
+  "started_utc": "20260913T214442Z",
+  "port": "COM9",
+  "reset": "rts",
+  "open_lines": "inactive",
+  "seconds": 60.0,
+  "hardware_capture": true,
+  "boot_banners": [
+    {
+      "at": 0.797,
+      "line": "M09_xbox_control: host Xbox velocity commands; preserved M08 startup and POSE/MOVE"
+    }
+  ],
+  "first_accuracy_seconds": {
+    "0": 1.266,
+    "1": 2.016
+  },
+  "state_samples": 77,
+  "readiness": [],
+  "last_state": {
+    "at": 59.25,
+    "phase": "STARTUP",
+    "heading": "4.756",
+    "yaw_error": "0.000",
+    "pitch": "6.502",
+    "pitch_error": "0.000",
+    "yaw_mode": "PROBE",
+    "pitch_mode": "PRECISION",
+    "yaw_motor": "IDLE",
+    "pitch_motor": "IDLE",
+    "concurrent": "NO",
+    "yaw_hz": "0.0",
+    "pitch_hz": "0.0",
+    "yaw_dps": "0.00",
+    "pitch_dps": "0.00",
+    "brake_deg": "0.00/0.00",
+    "BNO_fresh": "YES",
+    "age_ms": "0",
+    "max_gap_ms": "0",
+    "accuracy": "1",
+    "accuracy_low_ms": "0",
+    "north_usable": "NO"
+  },
+  "limitation": "Stock firmware stops STATE telemetry after readiness/abort; absent later samples do not prove accuracy stayed low.",
+  "exit_abort_sent": true
+}
