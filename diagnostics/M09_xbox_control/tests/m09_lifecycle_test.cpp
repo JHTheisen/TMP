@@ -62,7 +62,8 @@ int main(int argc, char **argv) {
     const std::string scenario = argv[1];
     simulated::baselineYaw = 70;
     simulated::baselinePitch = 8;
-    simulated::rawBnoPitch = -3;
+    simulated::physicalPitchUsesRoll = false;
+    simulated::rawBnoRoll = -3;
     simulated::independentTick = independentTick;
 
     const bool missingBno = scenario == "startup_missing_bno" || scenario == "manual_without_sensors" ||
@@ -72,7 +73,7 @@ int main(int argc, char **argv) {
     if (scenario == "startup_report_failure") simulated::reportInitFails = true;
     if (scenario == "startup_bus_a_failure") Wire.beginFails = true;
     if (scenario == "startup_bus_b_failure") simulated::busBInitFails = true;
-    if (scenario == "startup_low_accuracy" || scenario == "north_qualification" || scenario == "pitch_roll")
+    if (scenario == "startup_low_accuracy" || scenario == "north_qualification" || scenario == "pitch_mapping")
         simulated::accuracy = 1;
     if (scenario == "startup_invalid") simulated::invalidQuaternion = true;
     if (scenario == "startup_stale") simulated::bnoPauseEnd = 100000;
@@ -81,7 +82,7 @@ int main(int argc, char **argv) {
         Wire.encoder.raw = 1024;
         Wire1.encoder.raw = 2048;
     }
-    if (scenario == "pitch_roll") simulated::rawBnoPitchNoise = 1;
+    if (scenario == "pitch_mapping") simulated::rawBnoRollNoise = 1;
 
     const uint32_t setupAt = millis();
     setup();
@@ -207,21 +208,40 @@ int main(int argc, char **argv) {
         advance(2200);
         CHECK(pitchReady && referenceSet && northUsable);
         CHECK(yawPulsesPerDegree == 0 && pitchPulsesPerDegree == 0);
-        reject("MOVE 3 -2 0");
-        CHECK(Serial.output.find("timing response unavailable") != std::string::npos);
+        reject("MOVE 4 -2 0");
         CHECK(simulated::commands.empty());
-    } else if (scenario == "pitch_roll") {
+        line("POSE 71 7 0");
+        CHECK(poseActive && poseNeedsBno);
+        waitUntilIdle(90000);
+        CHECK(fabs(shortestDifference(71, orientation.heading)) <= TOLERANCE_DEG);
+        CHECK(fabs(orientation.pitch - 7) <= TOLERANCE_DEG);
+        CHECK(yawPulsesPerDegree > 0 && pitchPulsesPerDegree > 0);
+        CHECK(!simulated::commands.empty());
+        for (const auto &command : simulated::commands) {
+            CHECK(command.stepPin != 22 && !command.continuous);
+            CHECK(command.speed <= 80 && abs(command.steps) <= 16);
+            CHECK(!command.wasBraking && !command.beforeStoppedSample);
+        }
+    } else if (scenario == "pitch_mapping") {
         advance(2200);
         CHECK(pitchReady && !referenceSet && !northUsable);
         CHECK(fabs(baselinePitch - 8) < 0.001);
-        CHECK(fabs(orientation.roll - 8) < 0.001);
-        CHECK(orientation.pitch > -4.01 && orientation.pitch < -1.99);
+        CHECK(fabs(orientation.pitch - 8) < 0.001);
+        CHECK(orientation.roll > -4.01 && orientation.roll < -1.99);
         line("MOVE 0 -3 0");
         CHECK(poseActive && poseNeedsBno && !yawRequired);
         waitUntilIdle(90000);
-        CHECK(fabs(orientation.roll - 5) <= TOLERANCE_DEG);
+        CHECK(fabs(orientation.pitch - 5) <= TOLERANCE_DEG);
         CHECK(fabs(simulated::actualPitch() - 5) <= TOLERANCE_DEG);
-        CHECK(orientation.pitch > -4.01 && orientation.pitch < -1.99);
+        CHECK(orientation.roll > -4.01 && orientation.roll < -1.99);
+        CHECK(fabs(pitchAxis.current - physicalPitch()) < 0.01);
+        CHECK(fabs(pitchStartAngle - 8) < 0.001);
+        CHECK(pitchPulsesPerDegree > 0 && pitchAxis.peakAngularSpeed > 0);
+        sensorTelemetry(); advance(100);
+        CHECK(Serial.output.find("pitch_axis=PITCH") != std::string::npos);
+        char expected[64];
+        snprintf(expected, sizeof(expected), "physical_pitch=%.3f", physicalPitch());
+        CHECK(Serial.output.find(expected) != std::string::npos);
         CHECK(simulated::motors[0].position == 0 && simulated::motors[2].position == 0);
         for (const auto &command : simulated::commands) CHECK(command.stepPin == 12);
     } else {

@@ -22,14 +22,15 @@ struct PlantMotor {
     double position = 0, velocity = 0, target = 0, degrees = 0;
     double degreesPerStep = 0.02;
         int physicalSign = -1, direction = 1;
-    uint32_t speed = 40, stoppedAt = 0;
+    double speed = 40;
+    uint32_t stoppedAt = 0;
     int32_t acceleration = 240;
     bool frozen = false, neverStops = false, needsStoppedSample = false;
 };
 struct MoveCommand {
     uint8_t stepPin;
     int32_t steps;
-    uint32_t speed;
+    double speed;
     int32_t acceleration;
     uint32_t at, sampleAt;
     double yawAt, pitchAt;
@@ -50,8 +51,11 @@ static bool invalidQuaternion = false, wrongReportType = false;
 static uint8_t accuracy = 3;
 static double baselineYaw = 70.0, baselinePitch = 24.0;
 static double noiseAmplitude = 0, yawDisturbance = 0, pitchDisturbance = 0;
-// Raw BNO pitch is independent of the physical cradle pitch (BNO roll).
+// Historical M08 tests retain their original roll-mounted plant. Current M09
+// fixtures opt into the powered-log mounting, where cradle pitch is BNO pitch.
+static bool physicalPitchUsesRoll = true;
 static double rawBnoPitch = -3, rawBnoPitchNoise = 0;
+static double rawBnoRoll = -3, rawBnoRollNoise = 0;
 static bool frozenFeedback = false;
 static double heldYaw = 0, heldPitch = 0;
 static int pendingSerial = -1;

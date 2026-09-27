@@ -8,6 +8,9 @@ public:
     simulated::PlantMotor &plant() { return simulated::motors[index]; }
     void setDirectionPin(uint8_t pin, bool, uint16_t) { directionPin = pin; }
     int8_t setSpeedInHz(uint32_t value) { plant().speed = value; return simulated::speedFails ? -1 : 0; }
+    int8_t setSpeedInMilliHz(uint32_t value) { plant().speed = value / 1000.0; return simulated::speedFails ? -1 : 0; }
+    uint32_t getSpeedInMilliHz() { return static_cast<uint32_t>(plant().speed * 1000); }
+    uint32_t getAcceleration() { return plant().acceleration; }
     int8_t setAcceleration(int32_t value) { plant().acceleration = value; return simulated::accelerationFails ? -1 : 0; }
     int8_t move(int32_t steps) { return command(steps, false); }
     int8_t moveTo(int32_t position) { return command(position - getCurrentPosition(), false); }

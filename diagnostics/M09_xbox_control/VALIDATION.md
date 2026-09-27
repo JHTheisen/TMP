@@ -1,6 +1,146 @@
 # M09 offline validation — 2026-09-26
 
-## Current build: temporary pitch-direction diagnostics (2026-09-27)
+## Current host work: physical controller button mapping (2026-09-27)
+
+Replaced only the unavailable AUTO duration/play bindings: controller X (button 2)
+cycles duration and Center/Home (button 10) plays A to B. Y, LB/RB, stick clicks,
+D-pad, A/STOP and B/latched abort retain their existing assignments. Keyboard X
+still aborts; controller X does not. Displayed help and README distinguish them.
+The event handling, release latches, one-request protocol, mode gates, captures,
+serial ownership and firmware are unchanged.
+
+Updated the AUTO event tests to use the actual buttons. Additional cases verify
+X and Home release requirements, busy-press discard, no accidental X abort,
+inactive old buttons, and inactive X/Home in manual mode. Existing cases exercise
+the new bindings with raw mode, F3, STOP/abort priority and no AUTO JOG traffic.
+The 25 focused AUTO tests pass. A headless screenshot of the updated cheat sheet
+was inspected: `.pio/controller_mapping_ui.png`.
+
+The complete `tests/run_host_tests.ps1` suite passes: all 108 Python tests,
+all C++ unit/integration scenarios, and all 23 protected M08 hashes. Full output:
+`.pio/controller_remap_tests.txt`. `git diff --check` passes. No failures remain.
+No ESP32 rebuild was needed for this Python mapping-only change.
+
+Files changed in this host-only pass: `xbox_control.py`, `auto_control.py`,
+`tests/test_auto_control.py`, `tests/test_auto_ui.py`, `README.md`, `VALIDATION.md`.
+Firmware source SHA-256 hashes match the pre-remapping snapshot. No real serial
+port was opened, firmware flashed, hardware moved, milestone or Git tag created.
+
+## Previous work: Xbox AUTO and timed step keyframes (2026-09-27)
+
+Added stopped, request-correlated `SNAP` and finite three-axis `KEYMOVE` in an
+independent generated-step operation. Captures/playback carry a boot/confidence
+epoch; forced or uncertain stops invalidate old captures. Normal gentle STOP
+preserves captured coordinates. The existing angular POSE/MOVE admission,
+feedback and settling controller, manual JOG, and sensor worker remain in use.
+Carriage acceleration is explicitly restored before subsequent POSE carriage
+motion, so a preceding slow keyframe cannot change that existing operation.
+
+The Xbox AUTO interface provides pitch/yaw MOVE increments, A/B capture,
+5/10/20-second duration, return-to-A and deliberate A-to-B playback. No JOG is
+emitted while AUTO is selected. Fresh/released controls, one outstanding request,
+correlated snapshots, cancellation and timeout handling prevent repeated or
+deferred button motions. F2 and F3 remain available; AUTO status stays live under
+display freeze. Keyframe telemetry updates the current carriage display.
+
+Focused firmware coverage includes independent profile timing/progress math and
+16 operation scenarios: stopped snapshots, admission/malformed/epoch rejection,
+configuration and partial-start failure, low-accuracy three-axis and two-axis
+completion/reverse, zero motion, STOP/braking timeout, abort, stale/reset/pitch
+guard, sensor-worker-stall STOP latency, and unexpected individual motor stop.
+The completion scenario also exercises later relative carriage and pitch/carriage
+POSE operations to check the original acceleration is retained. New headless
+Python tests cover protocol correlation, capture validity, button release/busy
+discard, mode changes, STOP/abort precedence, dry-run, and F3 behavior. Tests use
+fake serial/controllers only. A simulated AUTO screenshot was inspected.
+
+Full regression output is `.pio/keyframe_regression.txt`; compile-only output is
+`.pio/keyframe_build.txt`. The complete suite passes: all C++ unit/integration
+scenarios (including the new timing math and 16 keyframe cases), all 105 Python
+tests, and all 23 protected M08 file hashes. `git diff --check` passes. No test
+failures remain. PlatformIO's first sandboxed attempt could not write
+its user cache lock; the authorized compile-only retry succeeded. The esp32dev
+image uses 47,396 bytes RAM and 383,905 bytes flash. No serial port was opened,
+firmware uploaded, physical motion performed, milestone created or Git tag made.
+
+Runtime success means generated-step endpoints reached, with
+`angle_settling=NOT_CHECKED`. Motors share a requested duration and start in one
+foreground pass; ESP32 scheduling, actual pulse timing and physical repeatability
+still need the supervised physical checks in README. Runtime endpoint timing
+tolerance is max(500 ms, 10% of requested duration), not pulse-exact synchronization.
+
+Files changed for this implementation:
+`src/main.cpp`, `src/manual_control.h`, new `src/keyframe_math.h`,
+new `src/keyframe_motion.h`, `xbox_control.py`, new `auto_control.py`,
+`tests/run_host_tests.ps1`, `tests/stubs/Arduino.h`, `tests/stubs/FastAccelStepper.h`,
+new `tests/keyframe_math_test.cpp`, new `tests/keyframe_motion_test.cpp`,
+new `tests/test_auto_control.py`, new `tests/test_auto_ui.py`, `README.md`,
+and `VALIDATION.md`. Earlier uncommitted POSE/F2/F3 changes are retained.
+
+## Previous host work: F3 diagnostic display freeze (2026-09-27)
+
+F3 snapshots only the diagnostic and scrolling response text. The yellow
+DISPLAY FROZEN banner is visible in manual and raw-command modes; controls and
+the raw editor remain live. Unfreezing redraws the latest processed state on the
+same frame, without replaying accumulated responses.
+
+`test_display_freeze_ui.py` uses real headless pygame rendering with simulated
+serial/controller objects. It checks fixed values/receipt ages/response text,
+background sensor state and logs, uninterrupted JOG timing and direction changes,
+STATUS polling, ignored key repeats, immediate latest-state redraw, F2 editing
+and submission, STOP/abort/focus loss/exit in both modes, and serial-free dry-run.
+A simulated frozen raw-mode screenshot was inspected for banner/layout clarity.
+The complete regression output is `.pio/display_freeze_tests.txt`.
+
+`tests/run_host_tests.ps1` passes: all C++ unit/integration scenarios, all 83
+Python tests (including four new freeze tests with safety subcases), and all 23
+protected M08 file hashes. `git diff --check` passes.
+
+Firmware source hashes match those before this display-only feature. No real
+serial port was opened, no firmware changed or flashed, no physical motion
+performed, and no milestone/tag created.
+
+## Previous host work: raw command entry (2026-09-27)
+
+The Python Xbox window now provides an F2 single-line editor through its existing
+serial connection. STOP/READY disarming, persistent JOG suppression, exact raw
+logging, reserved safety keys and current carriage telemetry are covered by new
+offline tests in `test_raw_command_session.py` and `test_raw_command_ui.py`.
+All pre-existing host/manual tests remain enabled. The complete regression output
+is `.pio/raw_command_tests.txt`.
+
+`tests/run_host_tests.ps1` passes: all C++ unit/integration scenarios, all 79
+Python tests (including 27 new raw-command tests), and all 23 protected M08 file
+hashes. `git diff --check` also passes.
+
+Headless pygame checks use fake joystick and serial objects and assert a single
+port construction; dry-run asserts none. They cover early Enter/no deferred send,
+malformed/Unicode/overlong raw forwarding, Tab separators, Space/A/F12 STOP,
+X/B abort, Esc/close/focus-loss precedence, exact logs, and deliberate rearming.
+Session tests also cover a buffered READY before a pending STOP: transmitting
+that STOP restores the wait for a subsequent READY. A simulated editor screenshot
+was inspected for layout; it is not a powered test.
+
+Firmware source hashes match those before this host feature. No firmware build
+was needed for the Python-only feature; no serial port was opened, no ESP32
+flashed, no physical test performed, and no milestone/tag created.
+
+## Firmware work: targeted POSE restoration (2026-09-27)
+
+See [POSE restoration](audit/POSE_RESTORATION_2026-09-27.md) for the current
+feedback mapping, first-move limits, STOP behavior, timestamp checks and proposed
+physical procedure. The current checkout remains M09; no new milestone was made.
+
+Complete offline regression suite and ESP32 compile-only build pass. Added 13
+POSE restoration scenarios and 7 POSE STOP scenarios; all 52 Python tests pass.
+All 23 protected M08 files are unchanged. Output is in
+`.pio/pose_restore_tests.txt` and `.pio/pose_restore_build.txt`.
+
+No serial connection, firmware upload or physical POSE validation occurred.
+Earlier records below describe their respective historical builds, including
+the now-superseded BNO roll feedback assumption.
+
+## Previous build: temporary pitch-direction diagnostics (2026-09-27)
 
 - ESP32 `esp32dev` build PASS: static RAM 47,204 / 327,680 bytes; flash
   376,473 / 1,310,720 bytes.

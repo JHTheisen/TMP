@@ -31,6 +31,9 @@ void completeManualSession(const char *reason) {
 void stopManualSession(const char *reason) {
     // The independent command timer already stops lost commands. Reassert in
     // the foreground and drain the existing motor queue before allowing rearm.
+    // The independent callback may already have forced every motor idle, so
+    // isRunning() alone cannot tell us that coordinate confidence was lost.
+    invalidateKeyframes(reason);
     stopMotors();
     completeManualSession(reason);
 }
@@ -61,7 +64,8 @@ bool executeManualCommand(char **tokens, unsigned count) {
             manualYaw.request = manualPitch.request = manualCarriage.request = 0;
             // Keep the lease until serviceManual actually issues braking to
             // every moving axis. Receiving zero alone has not stopped pulses.
-        }
+        } else if (keyframeActive) stopKeyframe("operator STOP");
+        else beginPoseStop();
         return true;
     }
     if (strcmp(tokens[0], "JOG") != 0) return false;
@@ -94,6 +98,7 @@ bool executeManualCommand(char **tokens, unsigned count) {
     return true;
 }
 void failManualAxis(FastAccelStepper *motor, ManualAxis &manual, const char *name, const char *reason) {
+    invalidateKeyframes(reason);
     motor->forceStop();
     if (motor == pitchMotor) {
         pitchDirectionDiagnostics.checkPending = false;

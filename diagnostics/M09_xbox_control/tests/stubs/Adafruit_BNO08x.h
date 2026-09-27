@@ -75,13 +75,17 @@ public:
         const double halfAngle = yawDegrees / RAD_TO_DEG / 2.0;
         const double pitchDegrees = simulated::frozenFeedback ? simulated::heldPitch : simulated::actualPitch();
         if (!simulated::frozenFeedback) { simulated::heldYaw = yawDegrees; simulated::heldPitch = pitchDegrees; }
-        const double halfRoll = pitchDegrees / RAD_TO_DEG / 2.0;
-        const double halfPitch = (simulated::rawBnoPitch + simulated::rawBnoPitchNoise * sin(millis() * 0.03)) / RAD_TO_DEG / 2.0;
+        const double rollDegrees = simulated::physicalPitchUsesRoll ? pitchDegrees :
+            simulated::rawBnoRoll + simulated::rawBnoRollNoise * sin(millis() * 0.03);
+        const double sensorPitchDegrees = simulated::physicalPitchUsesRoll ?
+            simulated::rawBnoPitch + simulated::rawBnoPitchNoise * sin(millis() * 0.03) : pitchDegrees;
+        const double halfRoll = rollDegrees / RAD_TO_DEG / 2.0;
+        const double halfPitch = sensorPitchDegrees / RAD_TO_DEG / 2.0;
         const double cy = cos(halfAngle), sy = sin(halfAngle);
         const double cp = cos(halfPitch), sp = sin(halfPitch);
         const double cr = cos(halfRoll), sr = sin(halfRoll);
-        // Z(yaw) * Y(raw BNO pitch) * X(physical cradle pitch = BNO roll).
-        // Keep raw pitch nonzero so using it accidentally cannot pass leveling.
+        // Z(yaw) * Y(BNO pitch) * X(BNO roll). The independent raw axis remains
+        // nonzero so selecting the wrong pitch feedback cannot pass control.
         event->un.rotationVector = {
             static_cast<float>(cy * cp * cr + sy * sp * sr),
             static_cast<float>(cy * cp * sr - sy * sp * cr),

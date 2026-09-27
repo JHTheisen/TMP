@@ -10,6 +10,7 @@ void advance(uint32_t ms) { const uint32_t at = millis(); while (millis() - at <
 bool near(double a, double b) { return fabs(a-b) < 0.001; }
 
 int main() {
+    simulated::physicalPitchUsesRoll = false;
     // Known rotations, independent of the simulated motor/quaternion generator.
     sh2_RotationVectorWAcc_t q = {0, 0, 0, 0, 0}; q.real = 1;
     EulerAngles e;
@@ -26,6 +27,26 @@ int main() {
     CHECK(quaternionToEuler(q, e) && near(e.heading, 270));
     q = {0, 0, 0, 0, 0}; CHECK(!quaternionToEuler(q, e));
     q.real = INFINITY; CHECK(!quaternionToEuler(q, e));
+
+    // Recorded powered JOG 0 1000 0 samples, independent of the simulated plant:
+    // audit/milestones/M09_manual_sensor_worker_verified_2026-09-27/powered.log
+    // lines 256 and 264, received at 12507 and 12998 ms. Negative generated
+    // pitch steps increased BNO pitch by 8.59 deg while roll barely changed.
+    const sh2_RotationVectorWAcc_t before = {
+        0.871337891f, -0.0151977539f, -0.0911254883f, -0.481872559f, 1.44677734f};
+    const sh2_RotationVectorWAcc_t after = {
+        0.874023438f, 0.0210571289f, -0.0256347656f, -0.484741211f, 1.44775391f};
+    EulerAngles beforeEuler, afterEuler;
+    CHECK(quaternionToEuler(before, beforeEuler) && quaternionToEuler(after, afterEuler));
+    CHECK(near(beforeEuler.pitch, -9.98875523) && near(afterEuler.pitch, -1.39795303));
+    CHECK(near(beforeEuler.roll, 3.57087493) && near(afterEuler.roll, 3.53625894));
+    CHECK(afterEuler.pitch - beforeEuler.pitch > 8.59);
+    CHECK(fabs(afterEuler.roll - beforeEuler.roll) < 0.04);
+    CHECK(fabs(shortestDifference(afterEuler.heading, beforeEuler.heading)) < 0.14);
+    orientation = beforeEuler;
+    CHECK(near(physicalPitch(), beforeEuler.pitch));
+    orientation = afterEuler;
+    CHECK(near(physicalPitch(), afterEuler.pitch));
 
     setup();
     sensorTelemetry();

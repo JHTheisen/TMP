@@ -2,6 +2,9 @@
 #include <cassert>
 #include <cstdio>
 int main() {
+#ifndef BNO_OBSERVER_M08
+    simulated::physicalPitchUsesRoll = false;
+#endif
     setup();
     simulated::serialInput = "POSE 20 10 100\nMOVE 5 5 100\nJOG 0 0\nJOG 500 500\n";
     while (millis() < 70000) loop();

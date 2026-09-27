@@ -40,6 +40,7 @@ void advance(uint32_t duration) { const auto start=millis(); while (millis()-sta
 }
 int main(int argc, char **argv) {
     assert(argc==2); mode=argv[1];
+    simulated::physicalPitchUsesRoll=false;
     simulated::independentTick=tick;
     Wire.encoder.present=Wire1.encoder.present=true;
     setup(); advance(50);

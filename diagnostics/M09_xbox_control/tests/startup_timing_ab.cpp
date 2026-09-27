@@ -19,6 +19,9 @@ int main(int argc, char **argv) {
     const uint32_t accuracyTwoAt = static_cast<uint32_t>(std::strtoul(argv[1], nullptr, 10));
     simulated::accuracy = 0;
     simulated::baselinePitch = 8;
+#ifndef AUDIT_M08
+    simulated::physicalPitchUsesRoll = false;
+#endif
     simulated::independentTick = auditTick;
     setup();
     uint32_t decisionAt = 0, nextPoll = 0;

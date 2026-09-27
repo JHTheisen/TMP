@@ -23,13 +23,14 @@ void assertManualRecovery() {
 int main(int argc, char **argv) {
     if (argc != 2) return 1;
     const std::string scenario = argv[1];
+    simulated::physicalPitchUsesRoll = false;
     simulated::independentTick = tick;
     simulated::baselineYaw = 20; simulated::baselinePitch = 8;
     if (scenario == "pitch_low" || scenario == "pitch_carriage_low") simulated::accuracy = 0;
     setup(); advance(2200);
     CHECK(commandIdle() && pitchReady && simulated::commands.empty());
-    // Known synthetic response exercises the unchanged planner. Production
-    // leaves missing first-boot timing explicitly unavailable.
+    // Known synthetic response exercises the learned-response planner. Separate
+    // lifecycle coverage checks conservative first-boot precision admission.
     yawPulsesPerDegree = 1 / simulated::motors[0].degreesPerStep;
     pitchPulsesPerDegree = 1 / simulated::motors[1].degreesPerStep;
     if (scenario == "invalid") {
@@ -47,10 +48,10 @@ int main(int argc, char **argv) {
             line("JOG 0 0 0"); CHECK(poseActive && !manualActive);
             complete();
             CHECK(Serial.output.find("FINAL RESULT: PASS") != std::string::npos);
-            CHECK(fabs(orientation.roll - 6) <= TOLERANCE_DEG);
+            CHECK(fabs(orientation.pitch - 6) <= TOLERANCE_DEG);
             CHECK(fabs(shortestDifference((scenario == "pitch_low" || scenario == "pitch_carriage_low") ? 20 : 23, orientation.heading)) <= TOLERANCE_DEG);
             CHECK(carriageMotor->getCurrentPosition() == (scenario == "pitch_low" ? 0 : 1200));
-            CHECK(fabs(orientation.pitch - simulated::rawBnoPitch) < 0.01);
+            CHECK(fabs(orientation.roll - simulated::rawBnoRoll) < 0.01);
         }
     } else {
         line("POSE 35 13 1200"); CHECK(poseActive);

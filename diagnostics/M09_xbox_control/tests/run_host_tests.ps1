@@ -29,7 +29,7 @@ try {
     Run-Cases 'lifecycle' @('startup_valid','startup_missing_bno','startup_init_failure','startup_report_failure',
         'startup_bus_a_failure','startup_bus_b_failure','startup_low_accuracy','startup_invalid','startup_stale',
         'encoders','encoder_failure','idle_recovery','reset_recovery','north_qualification','manual_without_sensors',
-        'angular_requires_bno','carriage_without_bno','carriage_overflow','missing_timing','pitch_roll')
+        'angular_requires_bno','carriage_without_bno','carriage_overflow','missing_timing','pitch_mapping')
     Build-Test 'manual_integration_test.cpp' 'manual'
     Run-Cases 'manual' @('startup','admission','axes','rates','reverse','stop_without_bno','missing_bno','low_accuracy',
         'stale','invalid','wrong_report','reset','no_orientation_limits','frozen_feedback','host_loss','malformed_lease',
@@ -40,6 +40,17 @@ try {
     Build-Test 'm08_pose_integration_test.cpp' 'pose_integration'
     Run-Cases 'pose_integration' @('coordinated','relative','pitch_low','pitch_carriage_low','no_op','invalid','stale',
         'blocked_bno','invalid_feedback','wrong_report','accuracy','reset','runaway','pitch_guard','no_progress','timeout','abort')
+    Build-Test 'pose_restoration_test.cpp' 'pose_restoration'
+    Run-Cases 'pose_restoration' @('first_pose','first_carriage','pitch_low','fallback_bounds','admission','yaw_hold','yaw_recovered',
+        'velocity_receipt','observe_receipt','settle_receipt','sample_order','receipt_rollover','baseline_receipt')
+    Build-Test 'pose_stop_test.cpp' 'pose_stop'
+    Run-Cases 'pose_stop' @('angular','carriage','pending','repeat','timeout','stall','abort')
+    Build-Test 'keyframe_math_test.cpp' 'keyframe_math'
+    & '.pio/host_tests/keyframe_math.exe'
+    if ($LASTEXITCODE -ne 0) { throw 'Keyframe timing math failed' }
+    Build-Test 'keyframe_motion_test.cpp' 'keyframe_motion'
+    Run-Cases 'keyframe_motion' @('snapshot','reject','admission','configuration','partial_start',
+        'complete','zero_axis','no_op','stop','brake_timeout','abort','stale','reset','pitch_guard','stall_stop','unexpected_stop')
     # Keep old startup/fallback regression evidence against M08, which is unchanged.
     Build-Test 'north_level_integration_test.cpp' 'm08_startup'
     $scenarios = @('normal', 'wrap_positive', 'wrap_negative', 'accuracy_brief', 'accuracy_repeated',

@@ -4,6 +4,7 @@
 
 void advance(uint32_t ms) { const auto start=millis(); while (millis()-start<ms) loop(); }
 int main() {
+    simulated::physicalPitchUsesRoll=false;
     setup(); advance(250);
     simulated::serialInput="JOG 0 0 0\n"; advance(20);
     simulated::serialInput="JOG 100 100 100\n"; advance(30);

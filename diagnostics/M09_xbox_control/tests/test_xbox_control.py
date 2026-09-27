@@ -175,6 +175,22 @@ class SessionTests(unittest.TestCase):
         self.assertIn("accuracy=3; fresh=NO", rows)
         self.assertIn("status=0; accepted=NO; age_ms=2; reason=invalid_quaternion", rows)
 
+    def test_physical_pitch_display_uses_declared_axis_not_raw_roll(self):
+        self.arm()
+        self.session.receive(
+            "BNO_STATE has_sample=YES accuracy=3 fresh=YES heading=301.800 "
+            "physical_pitch=-9.989 pitch_axis=PITCH pitch_roll=3.571", 2)
+        rows = "\n".join(self.session.diagnostic_lines(2.1))
+        self.assertIn("physical pitch/PITCH=-9.989 deg", rows)
+        self.assertNotIn("physical pitch/ROLL=3.571 deg", rows)
+        self.assertEqual(self.session.sensor_fields["pitch_roll"], "3.571")
+        self.assertEqual(self.session.frame(2.1, 0, 100), b"JOG 0 100 0\n")
+
+    def test_historical_firmware_roll_display_remains_labeled_roll(self):
+        self.session.receive("BNO_STATE heading=70 pitch_roll=8.000", 1)
+        rows = "\n".join(self.session.diagnostic_lines(1.1))
+        self.assertIn("physical pitch/ROLL=8.000 deg", rows)
+
 
 if __name__ == "__main__":
     unittest.main()

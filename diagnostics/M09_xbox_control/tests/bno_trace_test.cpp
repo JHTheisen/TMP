@@ -6,6 +6,7 @@
 
 void pump() { publishSensorContext(); sensorWorker.testDispatch(); consumeSensorStatus(); }
 int main() {
+    simulated::physicalPitchUsesRoll = false;
     setup();
     while (millis() < 50) loop();
     bnoTrace = BnoLifecycleDiagnostics{};

@@ -42,6 +42,7 @@ void aborted() {
 int main(int argc, char **argv) {
     if (argc != 2) return 1;
     const std::string scenario = argv[1];
+    simulated::physicalPitchUsesRoll = false;
     simulated::independentTick = tick;
     if (scenario == "missing_bno") simulated::bnoAckFails = true;
     if (scenario == "low_accuracy") simulated::accuracy = 0;
