@@ -1,6 +1,8 @@
 // Actual firmware decisions with synthetic BNO/motor feedback, including an
 // independent watchdog tick during blocked foreground reads.
-#include "../src/main.cpp"
+// Historical timeout/fallback expectations validate the immutable M08 baseline.
+// M09's optional references are covered by m09_lifecycle_test.cpp.
+#include "../../M08_go_to_pose/src/main.cpp"
 #include <cstdio>
 #include <cstdlib>
 #include <string>

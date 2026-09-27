@@ -21,10 +21,16 @@ void loop() {
         const int input = Serial.read();
         if (input == 'X' || input == 'x') abortTest("Operator X abort in sensor observer");
     }
-    if (!finalPrinted) {
+    if (!finalPrinted || commandIdle()) {
         serviceBno();
         if (millis() - lastDisplay >= 750) { lastDisplay = millis(); telemetry(); }
     }
+#ifndef BNO_OBSERVER_M08
+    publishSensorContext();
+#ifdef M07_HOST_TEST
+    sensorWorker.testDispatch();
+#endif
+#endif
     serviceSerialOutput();
     delay(1);
 }

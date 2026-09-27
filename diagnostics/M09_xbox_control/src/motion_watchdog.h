@@ -41,9 +41,11 @@ public:
         return true;
     }
 
-    // Pass the last accepted BNO sample time, not a replacement current time.
-    // A trip requires a board reset; neither disarm nor a later sample clears it.
+    // Pass the last accepted sample/command time, not a replacement current time.
+    // A later sample cannot erase a trip. Recovery is explicit and stopped-only.
     bool arm(uint32_t lastFreshMs) {
+        CheckGuard guard(checking_);
+        if (!guard.acquired) return false;
         if (!configured_ || state_.load(std::memory_order_acquire) != 0) return false;
         lastFreshMs_.store(lastFreshMs, std::memory_order_relaxed);
         uint32_t expected = 0;
@@ -53,9 +55,11 @@ public:
     }
 
     void recordFresh(uint32_t now) {
+        CheckGuard guard(checking_);
+        if (!guard.acquired) return; // Retry on the next sample; never erase an unchecked gap.
         // Check the old timestamp first. A late getSensorEvent return must not
         // hide a stale interval, even if the timer task has not run yet.
-        check(now);
+        checkLocked(now);
         if (state_.load(std::memory_order_acquire) == ARMED)
             lastFreshMs_.store(now, std::memory_order_release);
         // The timer may trip between that load and store; only the timestamp
@@ -64,6 +68,20 @@ public:
 
     void disarm() { state_.fetch_and(~ARMED, std::memory_order_acq_rel); }
 
+    bool configured() const { return configured_; }
+    bool armed() const { return (state_.load(std::memory_order_acquire) & ARMED) != 0; }
+
+    bool clearTripWhenStopped() {
+        // Do not wait in either task. A foreground caller can retry next loop.
+        // Serializing reset/arm with the whole callback (including forceStop)
+        // prevents an old callback from stopping a newly rearmed session.
+        CheckGuard guard(checking_);
+        if (!guard.acquired || !configured_ || armed() || yaw_->isRunning() ||
+            pitch_->isRunning() || (carriage_ && carriage_->isRunning())) return false;
+        state_.store(0, std::memory_order_release);
+        return true;
+    }
+
     bool tripped() const {
         return (state_.load(std::memory_order_acquire) & TRIPPED) != 0;
     }
@@ -71,6 +89,13 @@ public:
     // Public to let host fixtures advance the watchdog during a blocked BNO
     // call. Production invokes this from an independent periodic ESP timer.
     void check(uint32_t now) {
+        CheckGuard guard(checking_);
+        if (!guard.acquired) return;
+        checkLocked(now);
+    }
+
+private:
+    void checkLocked(uint32_t now) {
         uint32_t state = state_.load(std::memory_order_acquire);
         if (!(state & ARMED)) return;
         if (!(state & TRIPPED)) {
@@ -95,7 +120,14 @@ public:
         if (carriage_) carriage_->forceStop();
     }
 
-private:
+    struct CheckGuard {
+        std::atomic_flag &flag;
+        bool acquired;
+        explicit CheckGuard(std::atomic_flag &value)
+            : flag(value), acquired(!flag.test_and_set(std::memory_order_acquire)) {}
+        ~CheckGuard() { if (acquired) flag.clear(std::memory_order_release); }
+    };
+    std::atomic_flag checking_ = ATOMIC_FLAG_INIT;
     static constexpr uint32_t ARMED = 1;
     static constexpr uint32_t TRIPPED = 2;
     std::atomic<uint32_t> state_{0};

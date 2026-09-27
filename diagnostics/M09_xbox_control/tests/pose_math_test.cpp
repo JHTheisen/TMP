@@ -71,21 +71,20 @@ int main() {
     }
     // Exact stopped-burst case: 0.12 deg yaw -> two pulses -> 0.08 deg,
     // therefore a triangular two-pulse move plus one observation interval.
-    check(near(estimateAxisSeconds(0.12, false, 50, 0, 1000), finiteSeconds(2, 44, 240) + 0.1));
+    check(near(estimateAxisSeconds(0.12, false, 50, 0, 1000), finiteSeconds(2, 44, milestone7::ACCELERATION) + 0.1));
     check(near(estimateAxisSeconds(0.05, false, 50, 0, 1000), 0));
     check(isnan(estimateAxisSeconds(20, false, 0, 0, 1000)));
     check(isnan(estimateAxisSeconds(NAN, false, 50, 0, 1000)));
     check(isnan(estimateAxisSeconds(20, false, 50, NAN, 1000)));
     check(isnan(estimateAxisSeconds(20, false, 50, -1, 1000)));
-    check(isnan(estimateAxisSeconds(20, false, 50, 0, 1001)));
+    check(isnan(estimateAxisSeconds(20, false, 50, 0, milestone7::YAW_SLEW_SPEED_HZ + 1)));
     check(isnan(estimateAxisSeconds(20, false, 50, 0, 0)));
     check(isnan(estimateAxisSeconds(5, false, 50, 0, 1))); // burst timeout
     check(isnan(estimateAxisSeconds(1, false, 0.5, 0, 1000))); // nonconvergent response
-    // With the current 48-pulse pitch gain, cap 9 fits individual bursts but
-    // misses cumulative progress at 1200 pulses/degree; cap 10 meets the guard.
-    const double slowBurst = finiteSeconds(24, 9, 240);
+    // Individual current-gain bursts fit their deadline at cap 9, but
+    // cumulative progress at 1200 pulses/degree requires at least cap 10.
+    const double slowBurst = finiteSeconds(fabs(milestone7::correctionSteps(0.5, true, true)), 9, milestone7::ACCELERATION);
     check(slowBurst < MAX_PLANNED_BURST_SECONDS);
-    check(6 * (slowBurst + 0.1) > 15);
     check(isnan(estimateAxisSeconds(0.5, true, 1200, 0, 9)));
     check(isfinite(estimateAxisSeconds(0.5, true, 1200, 0, 10)));
     const AxisTiming progressLimited = chooseAxisCap(0.5, true, 1200, 0, 64.68);
@@ -94,11 +93,13 @@ int main() {
     // Once already in tolerance, this unchanged watchdog does not impose a
     // progress deadline; slow legal bursts can finish the tighter hold approach.
     check(isfinite(estimateAxisSeconds(0.4, true, 1200, 0, 6)));
-    check(near(slewProgressSeconds(false, 100, 1000), sqrt(30.0 / 1000)));
-    check(near(slewProgressSeconds(false, 1150, 100), 1.775));
-    check(PROGRESS_DEG * 1150 / 100 < MAX_PLANNED_SLEW_PROGRESS_SECONDS);
-    check(slewProgressSeconds(false, 1150, 100) > MAX_PLANNED_SLEW_PROGRESS_SECONDS);
-    check(isnan(estimateAxisSeconds(60, false, 1150, 0, 100)));
+    check(near(slewProgressSeconds(false, 100, 1000), sqrt(30.0 / milestone7::YAW_SLEW_ACCELERATION)));
+    // At the user's increased acceleration, 1160 still distinguishes steady
+    // speed from the extra time to accelerate; 1150 sat exactly on the deadline.
+    check(near(slewProgressSeconds(false, 1160, 100), 1.74 + 50.0 / milestone7::YAW_SLEW_ACCELERATION));
+    check(PROGRESS_DEG * 1160 / 100 < MAX_PLANNED_SLEW_PROGRESS_SECONDS);
+    check(slewProgressSeconds(false, 1160, 100) > MAX_PLANNED_SLEW_PROGRESS_SECONDS);
+    check(isnan(estimateAxisSeconds(60, false, 1160, 0, 100)));
     check(isnan(slewProgressSeconds(false, 0, 100)));
     check(isnan(slewProgressSeconds(false, 50, 0)));
     for (bool pitch : {false, true}) {

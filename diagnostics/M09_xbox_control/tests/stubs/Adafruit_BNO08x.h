@@ -2,11 +2,18 @@
 #include <Wire.h>
 constexpr uint8_t SH2_ROTATION_VECTOR = 5;
 constexpr int SH2_ERR_IO = -4;
+namespace simulated { static unsigned productQueries = 0; static int productQueryResult = 0; }
+extern "C" inline int m09_sh2_request_product_id() {
+    ++simulated::productQueries;
+    return simulated::productQueryResult;
+}
 struct sh2_Hal_t { int (*write)(sh2_Hal_t *, uint8_t *, unsigned); };
-struct sh2_RotationVectorWAcc_t { float real, i, j, k; };
+struct sh2_RotationVectorWAcc_t { float real, i, j, k, accuracy; };
 struct sh2_SensorValue_t {
     uint8_t sensorId = 0;
     uint8_t status = 0;
+    uint8_t sequence = 0;
+    uint64_t timestamp = 0;
     struct { sh2_RotationVectorWAcc_t rotationVector; } un;
 };
 class Adafruit_BNO08x {
@@ -42,8 +49,9 @@ public:
     bool getSensorEvent(sh2_SensorValue_t *event)
     {
         if (simulated::blockBnoMs) {
-            delay(simulated::blockBnoMs);
+            const auto duration = simulated::blockBnoMs;
             simulated::blockBnoMs = 0;
+            simulated::sensorDelay(duration);
         }
         if (!enabled_ || millis() - lastSampleMs_ < reportIntervalMs_ ||
             (millis() >= simulated::bnoPauseStart && millis() < simulated::bnoPauseEnd)) return false;
@@ -51,13 +59,15 @@ public:
         ++simulated::bnoReads;
         event->sensorId = simulated::wrongReportType ? 8 : SH2_ROTATION_VECTOR;
         event->status = simulated::accuracy;
+        event->sequence = static_cast<uint8_t>(simulated::bnoReads);
+        event->timestamp = static_cast<uint64_t>(millis()) * 1000 + 7;
         simulated::lastSampleAt = millis();
         if (simulated::resetDuringPoll) {
             simulated::bnoResetAt = millis();
             simulated::resetDuringPoll = false;
         }
         if (simulated::invalidQuaternion) {
-            event->un.rotationVector = {0, 0, 0, 0};
+            event->un.rotationVector = {0, 0, 0, 0, 0.125f};
             return true;
         }
         const double yawDegrees = (simulated::frozenFeedback ? simulated::heldYaw : simulated::actualYaw()) +
@@ -76,7 +86,7 @@ public:
             static_cast<float>(cy * cp * cr + sy * sp * sr),
             static_cast<float>(cy * cp * sr - sy * sp * cr),
             static_cast<float>(cy * sp * cr + sy * cp * sr),
-            static_cast<float>(sy * cp * cr - cy * sp * sr)};
+            static_cast<float>(sy * cp * cr - cy * sp * sr), 0.125f};
         return true;
     }
 protected:

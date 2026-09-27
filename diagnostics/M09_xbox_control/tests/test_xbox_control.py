@@ -32,10 +32,12 @@ class InputTests(unittest.TestCase):
 
     def test_cli_defaults_and_bounds(self):
         args = arguments([])
-        self.assertEqual((args.yaw_axis, args.pitch_axis, args.speed_scale), (2, 1, 0.25))
+        self.assertEqual((args.yaw_axis, args.pitch_axis, args.speed_scale), (2, 1, 1.0))
+        self.assertEqual(arguments(["--speed-scale", "0.25"]).speed_scale, 0.25)
         self.assertEqual(args.carriage_axis, 0)
         self.assertFalse(args.invert_carriage)
         self.assertTrue(arguments(["--invert-carriage"]).invert_carriage)
+        self.assertEqual(arguments(["--speed-scale", "1"]).speed_scale, 1.0)
         for flags in (["--speed-scale", "nan"], ["--speed-scale", "1.1"], ["--deadband", "0"],
                       ["--pitch-axis", "2"], ["--controller", "-1"],
                       ["--carriage-axis", "1"], ["--carriage-axis", "-1"]):
@@ -58,8 +60,16 @@ class SessionTests(unittest.TestCase):
         self.assertFalse(self.session.arm(0, True))
         self.session.receive("M09 READY", 1)
         self.assertFalse(self.session.arm(1.1, False))
-        self.assertFalse(self.session.arm(3, True))
         self.assertIsNone(self.session.frame(3, 250, 250))
+
+    def test_telemetry_age_does_not_block_centered_handshake(self):
+        self.session.receive("M09 READY", 1)
+        self.assertTrue(self.session.arm(3, True))
+        # Old READY permits only the zero handshake, never live stick motion.
+        self.assertEqual(self.session.frame(3.02, 250, -250, 100), b"JOG 0 0 0\n")
+        self.assertEqual(self.session.state, "arming")
+        self.session.receive("MANUAL READY: test", 3.04)
+        self.assertEqual(self.session.frame(3.06, 250, -250, 100), b"JOG 250 -250 100\n")
 
     def test_handshake_stream_stop_and_deliberate_rearm(self):
         self.arm()
@@ -72,32 +82,98 @@ class SessionTests(unittest.TestCase):
         self.assertIsNone(self.session.frame(1.32, 250, 250))
         self.assertTrue(self.session.arm(1.4, True))
 
-    def test_lost_feedback(self):
+    def test_lost_telemetry_warns_without_interrupting_live_commands(self):
         self.arm()
-        with self.assertRaisesRegex(RuntimeError, "telemetry lost"):
-            self.session.frame(2.2, 250, 250)
+        self.assertEqual(self.session.frame(2.2, 250, 250, -50), b"JOG 250 250 -50\n")
+        self.assertEqual(self.session.state, "active")
+        self.assertIn("Telemetry delayed", "\n".join(self.session.diagnostic_lines(2.2)))
+        self.session.receive("M09 MANUAL", 2.3)
+        self.assertNotIn("Telemetry delayed", "\n".join(self.session.diagnostic_lines(2.3)))
 
-    def test_firmware_fault_and_rejection(self):
-        for line in ("M09 ABORTED", "FINAL RESULT: FAIL", "MANUAL REJECTED: bad input"):
-            with self.assertRaises(RuntimeError):
-                self.session.receive(line, 1)
+    def test_firmware_fault_is_reported_without_sending_another_abort(self):
+        for line in ("M09 ABORTED", "FINAL RESULT: FAIL"):
+            self.session.receive(line, 1)
             self.assertEqual(self.session.state, "fault")
             self.assertFalse(self.session.arm(1, True))
+            self.assertIsNone(self.session.frame(1.1, 250, 250))
         self.session.receive("Reason: BNO085 feedback stale", 2)
-        with self.assertRaisesRegex(RuntimeError, "BNO085 feedback stale"):
-            self.session.receive("FINAL RESULT: FAIL", 2)
+        self.session.receive("FINAL RESULT: FAIL", 2)
+        self.assertIn("BNO085 feedback stale", self.session.readiness_note)
+
+    def test_rejection_stops_and_requires_new_centered_arm(self):
+        self.arm()
+        self.session.receive("MANUAL REJECTED: bad input", 1.3)
+        self.assertEqual(self.session.state, "idle")
+        self.assertEqual(self.session.frame(1.4, 250, 250), b"STOP\n")
+        self.assertIsNone(self.session.frame(1.5, 250, 250))
+        self.session.receive("M09 READY", 1.6)
+        self.assertFalse(self.session.arm(1.7, False))
+        self.assertTrue(self.session.arm(1.7, True))
+        self.assertEqual(self.session.frame(1.8, 250, 250), b"JOG 0 0 0\n")
 
     def test_reset_does_not_resume_stale_input(self):
         self.arm()
-        with self.assertRaises(RuntimeError):
-            self.session.receive("M09 BUSY", 1.3)
+        self.session.receive("M09 BUSY", 1.3)
+        self.assertEqual(self.session.frame(1.4, 250, 250), b"STOP\n")
+        self.session.receive("M09 READY", 1.5)
+        self.assertIsNone(self.session.frame(1.6, 250, 250))
+        self.assertFalse(self.session.arm(1.6, False))
+
+    def test_command_loss_stop_and_axis_error_have_different_scope(self):
+        self.arm()
+        self.session.receive("MANUAL AXIS ERROR: carriage stopped", 1.3)
+        self.assertEqual(self.session.frame(1.4, 25, 50), b"JOG 25 50 0\n")
+        self.session.receive("MANUAL STOPPED: command timeout", 1.5)
+        self.session.receive("M09 READY", 1.5)
+        self.assertIsNone(self.session.frame(1.6, 250, 250))
+        self.assertFalse(self.session.arm(1.6, False))
+
+    def test_pose_failure_does_not_latch_manual_fault(self):
+        self.session.receive("OPERATION FAILED: BNO unavailable", 1)
+        self.session.receive("M09 READY", 1.1)
+        self.assertTrue(self.session.arm(1.2, True))
 
     def test_acknowledgment_timeout(self):
         self.session.receive("M09 READY", 1)
         self.session.arm(1, True)
         self.session.receive("STATE BASELINE", 5.2)
-        with self.assertRaisesRegex(RuntimeError, "handshake"):
-            self.session.frame(5.3, 0, 0)
+        self.assertEqual(self.session.frame(5.3, 250, 250), b"STOP\n")
+        self.assertEqual(self.session.state, "idle")
+        self.assertIsNone(self.session.frame(5.4, 250, 250))
+        self.assertIn("timed out", self.session.readiness_note)
+
+    def test_stop_timeout_remains_recoverable(self):
+        self.arm()
+        self.session.stop(1.2)
+        self.assertEqual(self.session.frame(5.3, 250, 250), b"STOP\n")
+        self.assertIsNone(self.session.frame(5.4, 250, 250))
+        self.session.receive("M09 READY", 5.5)
+        self.assertTrue(self.session.arm(5.6, True))
+
+    def test_dedicated_sensor_reports_preserve_health_and_receipt_age(self):
+        self.arm()
+        self.session.receive("BNO_STATE available=NO fresh=NO age_ms=600 accuracy=0 north_usable=NO heading=nan pitch_roll=nan", 2)
+        self.session.receive("ENCODER_STATE bus=A available=YES valid=YES raw=2048 angle_deg=180.000 age_ms=4 status=0x20", 2)
+        self.session.receive("ENCODER_STATE bus=B available=YES valid=NO raw=100 angle_deg=8.789 age_ms=700 status=0x10", 2)
+        self.session.receive("STATE MANUAL heading=999", 2.1)
+        rows = "\n".join(self.session.diagnostic_lines(3.5))
+        self.assertIn("available=NO; accuracy=0; fresh=NO", rows)
+        self.assertIn("received 1.5 s ago", rows)
+        self.assertIn("raw=2048; angle=180.000 deg", rows)
+        self.assertIn("valid=NO; raw=100", rows)
+        self.assertIn("status=0x10", rows)
+        self.assertNotIn("heading=999", rows)
+        self.assertEqual(self.session.frame(3.5, 100, 0), b"JOG 100 0 0\n")
+
+    def test_raw_bno_does_not_overwrite_accepted_status(self):
+        self.session.receive("BNO_STATE has_sample=YES accuracy=3 fresh=NO age_ms=400", 1)
+        self.session.receive("BNO_RAW has_sample=YES report_id=0x05 raw_status=0 q_w=0 q_x=0 q_y=0 q_z=0 accepted=NO reason=invalid_quaternion age_ms=2", 2)
+        self.assertEqual(self.session.sensor_fields["accuracy"], "3")
+        self.assertEqual(self.session.bno_raw_fields["raw_status"], "0")
+        self.assertEqual(self.session.bno_raw_fields["q_w"], "0")
+        rows = "\n".join(self.session.diagnostic_lines(2.5))
+        self.assertIn("accuracy=3; fresh=NO", rows)
+        self.assertIn("status=0; accepted=NO; age_ms=2; reason=invalid_quaternion", rows)
 
 
 if __name__ == "__main__":

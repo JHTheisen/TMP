@@ -1,19 +1,47 @@
-param([string]$Compiler = 'C:\Strawberry\c\bin\g++.exe')
+param([string]$Compiler = 'C:\Strawberry\c\bin\g++.exe',
+      [string]$Python = "$env:USERPROFILE\.platformio\penv\Scripts\python.exe")
 $ErrorActionPreference = 'Stop'
 $projectPath = Split-Path -Parent $PSScriptRoot
+$previousPythonPath = $env:PYTHONPATH
 Push-Location -LiteralPath $projectPath
 try {
+    if (Test-Path '.pio/python_deps') { $env:PYTHONPATH = "$projectPath\.pio\python_deps;$previousPythonPath" }
     New-Item -ItemType Directory -Force -Path '.pio\host_tests' | Out-Null
-    & $Compiler -std=c++11 -Wall -Wextra -Werror -pedantic -I tests/stubs tests/control_math_test.cpp -o .pio/host_tests/math.exe
-    if ($LASTEXITCODE -ne 0) { throw 'M07 math test compilation failed' }
-    & '.pio\host_tests\math.exe'
-    if ($LASTEXITCODE -ne 0) { throw 'M07 math tests failed' }
-    & $Compiler -std=c++11 -Wall -Wextra -Werror -pedantic -Wno-unused-variable -DM07_HOST_TEST -I tests/stubs tests/watchdog_test.cpp -o .pio/host_tests/watchdog.exe
-    if ($LASTEXITCODE -ne 0) { throw 'M07 watchdog test compilation failed' }
-    & '.pio\host_tests\watchdog.exe'
-    if ($LASTEXITCODE -ne 0) { throw 'M07 watchdog tests failed' }
-    & $Compiler -std=c++11 -Wall -Wextra -Werror -pedantic -DM07_HOST_TEST -I tests/stubs -I ../../firmware/include tests/north_level_integration_test.cpp -o .pio/host_tests/integration.exe
-    if ($LASTEXITCODE -ne 0) { throw 'M07 integration test compilation failed' }
+    function Build-Test([string]$Source, [string]$Name) {
+        & $Compiler -std=c++11 -Wall -Wextra -Werror -pedantic -Wno-unused-variable -DM07_HOST_TEST -I tests/stubs -I ../../firmware/include "tests/$Source" -o ".pio/host_tests/$Name.exe"
+        if ($LASTEXITCODE -ne 0) { throw "Test compilation failed: $Source" }
+    }
+    function Run-Cases([string]$Name, [string[]]$Cases) {
+        foreach ($scenario in $Cases) {
+            & ".pio/host_tests/$Name.exe" $scenario
+            if ($LASTEXITCODE -ne 0) { throw "Test failed: $Name $scenario" }
+        }
+    }
+    # Separately test encoder restoration before the integrated motion suites.
+    foreach ($unit in @('encoder_acquisition','control_math','pose_math','watchdog','bno_observer','bno_diagnostics','bno_trace','sensor_handoff','sensor_result','pitch_direction_diagnostics')) {
+        Build-Test "$($unit)_test.cpp" $unit
+        & ".pio/host_tests/$unit.exe"
+        if ($LASTEXITCODE -ne 0) { throw "Unit test failed: $unit" }
+    }
+    Build-Test 'sensor_worker_stall_test.cpp' 'sensor_worker_stall'
+    Run-Cases 'sensor_worker_stall' @('jog','host_loss','stop','center','encoder','buffered_noise')
+    Build-Test 'm09_lifecycle_test.cpp' 'lifecycle'
+    Run-Cases 'lifecycle' @('startup_valid','startup_missing_bno','startup_init_failure','startup_report_failure',
+        'startup_bus_a_failure','startup_bus_b_failure','startup_low_accuracy','startup_invalid','startup_stale',
+        'encoders','encoder_failure','idle_recovery','reset_recovery','north_qualification','manual_without_sensors',
+        'angular_requires_bno','carriage_without_bno','carriage_overflow','missing_timing','pitch_roll')
+    Build-Test 'manual_integration_test.cpp' 'manual'
+    Run-Cases 'manual' @('startup','admission','axes','rates','reverse','stop_without_bno','missing_bno','low_accuracy',
+        'stale','invalid','wrong_report','reset','no_orientation_limits','frozen_feedback','host_loss','malformed_lease',
+        'late_packet','blocked_main','slow_encoders','braking_timeout','axis_rejected','unexpected_stop','long_manual',
+        'abort','axis_init','speed_init')
+    Build-Test 'manual_carriage_test.cpp' 'manual_carriage'
+    Run-Cases 'manual_carriage' @('protocol','axes','reverse','rates','unbounded','sensor_independent','host_loss','braking_timeout','axis_rejected')
+    Build-Test 'm08_pose_integration_test.cpp' 'pose_integration'
+    Run-Cases 'pose_integration' @('coordinated','relative','pitch_low','pitch_carriage_low','no_op','invalid','stale',
+        'blocked_bno','invalid_feedback','wrong_report','accuracy','reset','runaway','pitch_guard','no_progress','timeout','abort')
+    # Keep old startup/fallback regression evidence against M08, which is unchanged.
+    Build-Test 'north_level_integration_test.cpp' 'm08_startup'
     $scenarios = @('normal', 'wrap_positive', 'wrap_negative', 'accuracy_brief', 'accuracy_repeated',
         'accuracy_sustained', 'baseline_low', 'baseline_intermittent', 'brief_gap', 'stale_gap', 'blocked_bno',
         'fresh_after_stop', 'reset', 'reset_in_poll', 'startup_reset', 'invalid_vector', 'wrong_report',
@@ -22,54 +50,19 @@ try {
         'overall_timeout', 'braking_timeout', 'burst_timeout', 'move_rejected', 'yaw_slew_rejected',
         'pitch_slew_rejected', 'blocked_uart', 'frozen_feedback', 'settle_running', 'low_gain', 'first_test',
         'axis_init', 'report_init')
-    foreach ($scenario in $scenarios) {
-        & '.pio\host_tests\integration.exe' $scenario
-        if ($LASTEXITCODE -ne 0) { throw "M07 integration scenario failed: $scenario" }
-    }
-    & $Compiler -std=c++11 -Wall -Wextra -Werror -pedantic -I tests/stubs tests/pose_math_test.cpp -o .pio/host_tests/pose_math.exe
-    if ($LASTEXITCODE -ne 0) { throw 'M08 pose math test compilation failed' }
-    & '.pio\host_tests\pose_math.exe'
-    if ($LASTEXITCODE -ne 0) { throw 'M08 pose math tests failed' }
-    & $Compiler -std=c++11 -Wall -Wextra -Werror -pedantic -DM07_HOST_TEST -I tests/stubs -I ../../firmware/include tests/m08_pose_integration_test.cpp -o .pio/host_tests/pose_integration.exe
-    if ($LASTEXITCODE -ne 0) { throw 'M08 pose integration test compilation failed' }
-    $poseScenarios = @('coordinated', 'lower_gain', 'no_op', 'carriage_only', 'yaw_only', 'pitch_only', 'relative', 'small_relative',
-        'repeated_absolute', 'invalid', 'relative_bounds', 'busy', 'startup_busy', 'fragmented', 'idle_feedback',
-        'idle_stale', 'idle_reset', 'idle_motion', 'missing_timing', 'blocked_output', 'abort', 'stale', 'blocked_bno', 'reset',
-        'carriage_rejected', 'carriage_timeout', 'pitch_low_entry', 'pitch_accuracy_drop',
-        'carriage_accuracy_brief', 'carriage_accuracy_sustained')
-    foreach ($scenario in $poseScenarios) {
-        & '.pio\host_tests\pose_integration.exe' $scenario
-        if ($LASTEXITCODE -ne 0) { throw "M08 pose integration scenario failed: $scenario" }
-    }
-    & $Compiler -std=c++11 -Wall -Wextra -Werror -pedantic -DM07_HOST_TEST -I tests/stubs -I ../../firmware/include tests/pitch_readiness_test.cpp -o .pio/host_tests/pitch_readiness.exe
-    if ($LASTEXITCODE -ne 0) { throw 'M08 pitch readiness test compilation failed' }
+    Run-Cases 'm08_startup' $scenarios
+    Build-Test 'pitch_readiness_test.cpp' 'm08_pitch_readiness'
     $pitchScenarios = @('accuracy_zero', 'accuracy_one', 'unstable_heading', 'invalid_baseline', 'stale_baseline',
         'unstable_pitch', 'calibration_recovers', 'late_accuracy', 'baseline_criteria', 'idle_stale', 'idle_reset',
         'stale', 'blocked_bno', 'invalid_motion', 'wrong_report', 'reset', 'reset_in_poll', 'abort',
         'wrong_direction', 'no_progress', 'pitch_guard', 'yaw_guard', 'timeout', 'blocked_uart', 'roll_mapping')
-    foreach ($scenario in $pitchScenarios) {
-        & '.pio\host_tests\pitch_readiness.exe' $scenario
-        if ($LASTEXITCODE -ne 0) { throw "M08 pitch readiness scenario failed: $scenario" }
-    }
-    & $Compiler -std=c++11 -Wall -Wextra -Werror -pedantic -DM07_HOST_TEST -I tests/stubs -I ../../firmware/include tests/manual_integration_test.cpp -o .pio/host_tests/manual.exe
-    if ($LASTEXITCODE -ne 0) { throw 'M09 manual test compilation failed' }
-    $manualScenarios = @('startup_busy', 'admission', 'pitch_only_ready', 'center', 'axes', 'reverse', 'pose_after',
-        'rate_update', 'busy', 'blocked_uart', 'host_loss', 'partial', 'malformed_lease', 'blocked_host', 'stale', 'invalid',
-        'wrong_report', 'blocked_bno', 'accuracy', 'reset', 'abort', 'wrong_direction', 'no_progress', 'yaw_guard',
-        'pitch_guard', 'braking_timeout', 'timeout', 'speed_rejected', 'late_packet',
-        'low_axes', 'low_reverse', 'low_stale', 'low_invalid', 'low_wrong_report', 'low_reset',
-        'low_host_loss', 'low_abort', 'low_yaw_guard', 'low_pitch_guard', 'low_wrong_direction', 'low_no_progress')
-    foreach ($scenario in $manualScenarios) {
-        & '.pio\host_tests\manual.exe' $scenario
-        if ($LASTEXITCODE -ne 0) { throw "M09 manual scenario failed: $scenario" }
-    }
-    & $Compiler -std=c++11 -Wall -Wextra -Werror -pedantic -DM07_HOST_TEST -I tests/stubs -I ../../firmware/include tests/manual_carriage_test.cpp -o .pio/host_tests/manual_carriage.exe
-    if ($LASTEXITCODE -ne 0) { throw 'M09 carriage test compilation failed' }
-    $carriageScenarios = @('protocol', 'axes', 'reverse', 'rate', 'pose_after', 'limits', 'near_limit', 'boundary_stop',
-        'host_loss', 'malformed', 'stale', 'invalid', 'wrong_report', 'blocked_bno', 'reset', 'abort',
-        'braking_timeout', 'stop_stale', 'limit_guard', 'timeout', 'speed_rejected')
-    foreach ($scenario in $carriageScenarios) {
-        & '.pio\host_tests\manual_carriage.exe' $scenario
-        if ($LASTEXITCODE -ne 0) { throw "M09 carriage scenario failed: $scenario" }
-    }
-} finally { Pop-Location }
+    Run-Cases 'm08_pitch_readiness' $pitchScenarios
+    # unittest's normal progress uses stderr; Windows PowerShell must not turn
+    # passing test output into a terminating NativeCommandError under redirection.
+    $ErrorActionPreference = 'Continue'
+    & $Python -B -m unittest discover -s tests -p 'test_*.py' -v
+    $pythonExit = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    if ($pythonExit -ne 0) { throw 'Python tests failed' }
+    & (Join-Path $PSScriptRoot 'verify_m08_baseline.ps1')
+} finally { $env:PYTHONPATH = $previousPythonPath; Pop-Location }

@@ -36,6 +36,8 @@ struct MoveCommand {
     bool continuous, wasBraking, beforeStoppedSample;
 };
 static uint32_t now = 0, lastSampleAt = 0;
+// Independent GPIO latch fixture: intentionally not derived from motor sign.
+static uint32_t gpioOutput = 0;
 static PlantMotor motors[3];
 static bool axisInitFails = false, busBInitFails = false, bnoInitFails = false;
 static bool reportInitFails = false, bnoAckFails = false, speedFails = false, accelerationFails = false;
@@ -60,6 +62,7 @@ static uint32_t firstForceStopAt = 0;
 static std::vector<MoveCommand> commands;
 static std::vector<uint8_t> connectedPins, highPins, addressedSensors;
 static void (*independentTick)(uint32_t) = nullptr;
+static void (*sensorWait)(uint32_t) = nullptr;
 
 inline double actualYaw() { return baselineYaw + motors[0].degrees + yawDisturbance; }
 inline double actualPitch() { return baselinePitch + motors[1].degrees + pitchDisturbance; }
@@ -95,7 +98,13 @@ inline void advance(uint32_t duration) {
 }
 }
 inline uint32_t millis() { return simulated::now; }
+inline uint32_t micros() { return simulated::now * 1000U; }
 inline void delay(uint32_t duration) { simulated::advance(duration); }
+namespace simulated {
+inline void sensorDelay(uint32_t duration) {
+    if (sensorWait) sensorWait(duration); else advance(duration);
+}
+}
 inline void pinMode(uint8_t, int) {}
 inline void digitalWrite(uint8_t pin, int value) { if (value != LOW) simulated::highPins.push_back(pin); }
 template <typename T> T constrain(T value, T minimum, T maximum)

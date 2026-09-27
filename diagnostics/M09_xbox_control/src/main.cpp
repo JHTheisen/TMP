@@ -7,11 +7,19 @@
 #include <climits>
 #include <FastAccelStepper.h>
 #include <Wire.h>
+#ifndef M07_HOST_TEST
+#include <soc/gpio_reg.h>
+#include <soc/soc.h>
+#endif
 #include "hardware_config.h"
 #include "sensor_support.h"
 #include "control_math.h"
 #include "motion_watchdog.h"
 #include "pose_math.h"
+#include "encoder_acquisition.h"
+#include "bno_diagnostics.h"
+#include "sensor_worker.h"
+extern "C" int m09_sh2_request_product_id(void);
 
 namespace {
 using milestone4::BnoHealth;
@@ -19,14 +27,14 @@ using milestone4::DiagnosticBno085;
 using milestone4::EulerAngles;
 using milestone4::quaternionToEuler;
 using namespace milestone7;
-constexpr uint32_t STARTUP_MS = 5000, BASELINE_MS = 1000, BASELINE_TIMEOUT_MS = 20000;
+constexpr uint32_t BASELINE_MS = 1000;
 constexpr uint32_t BNO_STALE_MS = 150, WINDOW_GAP_MS = 100, SETTLE_MS = 1000;
 constexpr uint32_t LEG_TIMEOUT_MS = 90000, PROGRESS_TIMEOUT_MS = 15000;
 constexpr double RELATIVE_LIMIT_DEG = 185.0, MAX_USABLE_PITCH_DEG = 75.0;
 // Earlier three-axis diagnostics used these carriage speed/acceleration values.
 // Position is generated pulses from power-up, not a homed or measured distance.
-constexpr uint32_t CARRIAGE_MAX_SPEED_HZ = 1000;
-constexpr int32_t CARRIAGE_ACCELERATION = 1000, CARRIAGE_LIMIT_STEPS = 500;
+constexpr uint32_t CARRIAGE_MAX_SPEED_HZ = 2000;
+constexpr int32_t CARRIAGE_ACCELERATION = 2000;
 enum class Operation { NORTH_LEVEL, POSE, MANUAL };
 
 enum class Phase { STARTUP, BASELINE, MOVING, SETTLING, COMPLETE, ABORTED, MANUAL };
@@ -50,12 +58,23 @@ struct Window {
 FastAccelStepperEngine engine;
 FastAccelStepper *yawMotor = nullptr, *pitchMotor = nullptr;
 FastAccelStepper *carriageMotor = nullptr;
-DiagnosticBno085 bno;
+m09::SensorWorker sensorWorker;
+m09::EncoderSnapshot encoders;
+m09::SensorSnapshot sensorSnapshot;
+uint32_t sensorResetEpoch = 0, sensorSampleDrops = 0, bnoWriteFailures = 0;
+uint32_t foregroundTraceDrops = 0;
+bool sensorSetupReported = false;
+BnoDiagnostics bnoDiagnostics;
+uint8_t acceptedBnoSequence = 0;
+uint64_t acceptedBnoTimestamp = 0;
+uint32_t telemetryDrops = 0;
+uint32_t lastSensorDisplay = 0;
 MotionWatchdog motionWatchdog;
 // A separate instance adds a host-command lease without changing M08's BNO watchdog.
 MotionWatchdog commandWatchdog;
 constexpr uint32_t MANUAL_COMMAND_TIMEOUT_MS = 250;
 bool manualActive = false, manualEnding = false;
+bool controlReady = false, bnoWatchdogReady = false, poseNeedsBno = true;
 struct ManualAxis {
     int request = 0, direction = 0;
     uint32_t rate = 0, brakeAt = 0, stoppedAt = 0, progressAt = 0;
@@ -97,6 +116,7 @@ size_t commandLength = 0;
 bool commandOverflow = false;
 
 bool commandIdle() { return finalPrinted && phase == Phase::COMPLETE; }
+void stopManualSession(const char *reason);
 uint32_t limitedSpeed(const Axis &axis, uint32_t native) {
     return poseActive ? std::min(native, axis.pitch ? pitchRateCap : yawRateCap) : native;
 }
@@ -127,7 +147,7 @@ void queueText(const char *line) {
     if (txOffset == txLength) txOffset = txLength = 0;
     if (length <= sizeof(txBuffer) - txLength) {
         memcpy(txBuffer + txLength, line, length); txLength += length;
-    }
+    } else ++telemetryDrops;
 }
 void serviceSerialOutput() {
     const int available = Serial.availableForWrite();
@@ -160,6 +180,7 @@ const char *phaseText() {
     return "UNKNOWN";
 }
 bool fresh(uint32_t now) { return bnoValid && reportEnabled && now - lastBnoGood < BNO_STALE_MS; }
+#include "bno_lifecycle_diagnostics.h"
 void stopMotors() {
     if (yawMotor) yawMotor->forceStop();
     if (pitchMotor) pitchMotor->forceStop();
@@ -171,11 +192,14 @@ void stopMotors() {
 }
 void finish(bool passed, const char *reason) {
     if (finalPrinted) return;
-    if (passed && !manualActive) learnTimingResponse();
+    const bool recoverable = !passed && poseActive;
+    if (passed && poseActive && poseNeedsBno) learnTimingResponse();
     stopMotors(); motionWatchdog.disarm(); finalPrinted = true; window.active = false;
     commandWatchdog.disarm(); manualActive = manualEnding = false;
     manualYaw.request = manualPitch.request = manualCarriage.request = 0;
-    phase = passed ? Phase::COMPLETE : Phase::ABORTED;
+    phase = (passed || recoverable) ? Phase::COMPLETE : Phase::ABORTED;
+    // Clearing a trip is permitted only after the independent stop has ended.
+    if (phase == Phase::COMPLETE) motionWatchdog.clearTripWhenStopped();
     // READY continues BNO acquisition: queue the summary instead of waiting on
     // UART space. Discard optional pending snapshots, including any partial line.
     txOffset = txLength = 0;
@@ -208,88 +232,126 @@ void finish(bool passed, const char *reason) {
         concurrentThreeMotion ? "YES" : "NO", yawAxis.settled && pitchAxis.settled ? "YES" : "NO",
         static_cast<unsigned long>(bnoHealth.freshSamples), static_cast<unsigned long>(invalidVectors),
         static_cast<unsigned long>(bnoResets), static_cast<unsigned long>(reportFailures),
-        static_cast<unsigned long>(DiagnosticBno085::writeFailures), static_cast<unsigned long>(bnoMaxGap),
+        static_cast<unsigned long>(bnoWriteFailures), static_cast<unsigned long>(bnoMaxGap),
         static_cast<unsigned long>(accuracyGrace.episodes), static_cast<unsigned long>(accuracyGrace.recoveries),
         static_cast<unsigned long>(std::max(accuracyGrace.longestMs, accuracyGrace.age(millis()))),
-        motionWatchdog.tripped() ? "YES" : "NO", reason, passed ? "PASS" : "FAIL",
-        passed ? (referenceSet ? "READY: POSE yaw_deg pitch_deg carriage_steps; MOVE delta_yaw_deg delta_pitch_deg delta_steps. No automatic motion." :
-                 "PITCH-ONLY READY: north unavailable; MOVE 0 <pitch_delta_deg> 0. No automatic motion; reset for calibrated north startup.") :
-                 "Latched abort; reset required. X/x aborts without automatic retry.");
+        motionWatchdog.tripped() ? "YES" : "NO", reason, passed ? "PASS" : (recoverable ? "STOPPED" : "FAIL"),
+        (passed || recoverable) ? "M09 READY" : "Latched abort; reset required. X/x aborts without automatic retry.");
     poseActive = false; carriagePending = false;
     queueText(summary);
+    if (recoverable) { queueText("OPERATION FAILED: "); queueText(reason); queueText("\n"); }
 }
-void abortTest(const char *reason) {
+void abortTest(const char *reason, bool latch = false) {
+    if (latch) poseActive = false; // Explicit operator abort always remains latched.
     if (commandIdle()) finalPrinted = false;
     finish(false, reason);
 }
+bool checkSensorReset();
 void safety() {
+    checkSensorReset();
     if (manualActive) commandWatchdog.check(millis());
     if (manualActive && commandWatchdog.tripped()) {
-        abortTest("Manual command stream lost for 250 ms; reset required"); return;
+        stopManualSession("command stream lost for 250 ms; rearm centered"); return;
     }
-    if (!pitchReady && !referenceSet) return;
-    if (finalPrinted) {
-        // Continuing to accept poses needs a continuous heading reference.
-        // An idle outage can hide manual motion just as an active outage can.
-        if (commandIdle() && millis() - lastBnoGood >= BNO_STALE_MS)
-            abortTest("BNO085 stale while idle: heading continuity unverified; reset required");
-        return;
-    }
+    if (manualActive || finalPrinted || !poseActive) return;
+    if (millis() - controlStartedAt >= LEG_TIMEOUT_MS) { abortTest("Pose control timeout"); return; }
+    if (!poseNeedsBno) return;
     const uint32_t now = millis(); bnoMaxGap = std::max(bnoMaxGap, now - lastBnoGood);
     if (motionWatchdog.tripped() || now - lastBnoGood >= BNO_STALE_MS) abortTest("BNO085 feedback stale: acquisition gap reached 150 ms");
     else if (yawRequired && bnoAccuracy < BNO_MIN_ACCURACY)
-        abortTest("BNO085 accuracy below 2: yaw operation stopped; reset required");
+        abortTest("BNO085 accuracy below 2: yaw operation stopped");
     else if (accuracyRequired && accuracyGrace.expired(now)) abortTest("BNO085 accuracy below 2 continuously for 1000 ms");
     else if (bnoValid && fabs(heading.continuous - (referenceSet ? northTargetContinuous : pitchReadyYaw)) >= RELATIVE_LIMIT_DEG)
         abortTest(referenceSet ? "Measured yaw travel guard exceeded +/-185 degrees from continuous north target" :
             "Measured yaw travel guard exceeded +/-185 degrees from pitch-only startup orientation");
     else if (bnoValid && fabs(orientation.roll) >= MAX_USABLE_PITCH_DEG)
         abortTest("Measured pitch reached +/-75 degree absolute guard");
-    else if (carriageMotor && (carriageMotor->getCurrentPosition() < -CARRIAGE_LIMIT_STEPS || carriageMotor->getCurrentPosition() > CARRIAGE_LIMIT_STEPS))
-        abortTest("Carriage startup-relative step guard exceeded +/-500 steps");
-    else if (now - controlStartedAt >= LEG_TIMEOUT_MS)
-        abortTest(poseActive ? "Three-axis pose control timeout" : "Two-axis control timeout");
 }
-bool enableReport() {
-    lastReportAttempt = millis(); reportEnabled = bno.enableReport(SH2_ROTATION_VECTOR, milestone4::BNO_REPORT_INTERVAL_US);
-    if (!reportEnabled) ++reportFailures;
-    return reportEnabled;
+void invalidateOrientation(const char *reason) {
+    const bool hadData = bnoValid || pitchReady || referenceSet;
+    bnoValid = pitchReady = referenceSet = northUsable = false;
+    heading = {}; window.active = false;
+    if (hadData) { queueText("BNO WARNING: "); queueText(reason); queueText("\n"); }
+    if (poseActive && poseNeedsBno) abortTest(reason);
 }
-bool handleReset() {
-    if (!bno.wasReset()) return false;
-    ++bnoResets; bnoValid = false; window.interrupted = true;
-    if (referenceSet) abortTest("BNO085 reset after north reference: orientation continuity lost");
-    else if (pitchReady) abortTest("BNO085 reset after pitch baseline: orientation continuity lost");
-    else { heading = {}; northUsable = false; enableReport(); }
+bool checkSensorReset() {
+    const uint32_t epoch = sensorWorker.resetEpoch.load(std::memory_order_acquire);
+    if (epoch == sensorResetEpoch) return false;
+    sensorResetEpoch = epoch;
+    invalidateOrientation("sensor reset; orientation reference unavailable");
     return true;
 }
+void consumeSensorStatus() {
+    if (sensorWorker.status.read(sensorSnapshot)) {
+        bnoInitialized = sensorSnapshot.bnoInitialized;
+        reportEnabled = sensorSnapshot.reportEnabled;
+        bnoResets = sensorSnapshot.consumedResets;
+        reportFailures = sensorSnapshot.reportFailures;
+        bnoWriteFailures = sensorSnapshot.writeFailures;
+        sensorSampleDrops = sensorSnapshot.sampleDrops;
+        encoders = sensorSnapshot.encoders;
+        static_cast<BnoIoStatistics &>(bnoTrace) = sensorSnapshot.io;
+        bnoTrace.dropped += foregroundTraceDrops;
+        if (sensorSnapshot.setupDone && !sensorSetupReported) {
+            sensorSetupReported = true;
+            if (!encoders.state(0).busAvailable) queueText("ENCODER WARNING: Bus A unavailable\n");
+            if (!encoders.state(1).busAvailable) queueText("SENSOR WARNING: Bus B unavailable\n");
+            if (!bnoInitialized || !reportEnabled)
+                queueText("BNO WARNING: orientation unavailable; manual control remains available\n");
+        }
+    }
+    BnoTraceEvent trace;
+    for (unsigned n=0; n<8 && sensorWorker.traces.pop(trace); ++n) {
+        if (bnoTrace.size == 32) { ++foregroundTraceDrops; ++bnoTrace.dropped; }
+        else bnoTrace.events[(bnoTrace.head + bnoTrace.size++) % 32] = trace;
+    }
+}
 void serviceBno() {
-    if (!bnoInitialized) return;
-    safety(); if (finalPrinted && !commandIdle()) return;
-    handleReset(); if (finalPrinted && !commandIdle()) return;
-    if (!reportEnabled && millis() - lastReportAttempt >= 500) enableReport();
-    sh2_SensorValue_t event = {};
-    const bool gotEvent = bno.getSensorEvent(&event), reset = handleReset();
+    consumeSensorStatus();
+    checkSensorReset();
+    if (bnoValid && millis() - lastBnoGood >= BNO_STALE_MS)
+        invalidateOrientation("data stale; orientation reference unavailable");
     safety();
-    if ((finalPrinted && !commandIdle()) || reset || !gotEvent || !reportEnabled || event.sensorId != SH2_ROTATION_VECTOR) return;
+    m09::SensorSample sample;
+    if (!sensorWorker.samples.pop(sample)) return;
+    const auto &event = sample.event;
+    bnoDiagnostics.observe(event, sample.receivedMs);
+    if ((finalPrinted && !commandIdle()) || !reportEnabled ||
+        sample.epoch != sensorWorker.resetEpoch.load(std::memory_order_acquire) ||
+        millis() - sample.receivedMs >= BNO_STALE_MS || event.sensorId != SH2_ROTATION_VECTOR) {
+        if (event.sensorId == SH2_ROTATION_VECTOR)
+            bnoDiagnostics.reason = sample.epoch != sensorResetEpoch ? "reset" :
+                (millis()-sample.receivedMs >= BNO_STALE_MS ? "stale_handoff" :
+                 (!reportEnabled ? "report_disabled" : "inactive"));
+        return;
+    }
     EulerAngles result;
-    if (!quaternionToEuler(event.un.rotationVector, result)) { ++invalidVectors; window.interrupted = true; return; }
-    if (!heading.update(result.heading)) { abortTest("Ambiguous/nonfinite BNO heading transition"); return; }
-    const uint32_t now = millis();
+    if (!quaternionToEuler(event.un.rotationVector, result)) {
+        bnoDiagnostics.reason = "invalid_quaternion";
+        ++invalidVectors; window.interrupted = true; return;
+    }
+    bnoDiagnostics.euler = result; bnoDiagnostics.eulerValid = true;
+    if (!heading.update(result.heading)) {
+        bnoDiagnostics.reason = "ambiguous_heading";
+        invalidateOrientation("ambiguous heading transition"); return;
+    }
+    const uint32_t now = sample.receivedMs; // Never make queued old feedback fresh at consumption.
     bnoHealth.recordFresh(now, pitchReady || referenceSet); orientation = result; bnoAccuracy = event.status;
+    bnoDiagnostics.accepted = true; bnoDiagnostics.reason = "accepted";
+    acceptedBnoSequence = event.sequence; acceptedBnoTimestamp = event.timestamp;
     bnoValid = true; lastBnoGood = now;
-    if ((pitchReady || referenceSet) && !finalPrinted) {
+    if (poseActive && poseNeedsBno) {
         motionWatchdog.recordFresh(now);
     }
     if (accuracyRequired && referenceSet && !finalPrinted) {
         const bool wasLow = accuracyGrace.low;
         accuracyGrace.observe(event.status, now);
         northUsable = event.status >= BNO_MIN_ACCURACY;
-        if (!wasLow && accuracyGrace.low) queueText("BNO ACCURACY LOW: yaw disabled; carriage accuracy grace=1000 ms; stale deadline remains 150 ms\n");
+        if (!wasLow && accuracyGrace.low) queueText("BNO ACCURACY LOW: north-dependent positioning unavailable\n");
         if (wasLow && !accuracyGrace.low) queueText("BNO ACCURACY RECOVERED: continuous low timer cleared\n");
     }
     northUsable = bnoAccuracy >= BNO_MIN_ACCURACY && referenceSet;
-    safety(); if (finalPrinted) return;
+    safety(); if (phase == Phase::ABORTED) return;
     if (yawMotor && yawMotor->isRunning()) { ++yawAxis.motionSamples; sawYawMotion = true; }
     if (pitchMotor && pitchMotor->isRunning()) { ++pitchAxis.motionSamples; sawPitchMotion = true; }
     if (yawMotor && yawMotor->isRunning() && pitchMotor && pitchMotor->isRunning()) concurrentMotion = true;
@@ -319,6 +381,23 @@ bool stableBaseline() {
         window.pitch.sd() <= 0.15 && window.heading.range() <= 0.5 && window.pitch.range() <= 0.5 &&
         fabs(window.secondHeading.mean() - window.firstHeading.mean()) <= 0.2 &&
         fabs(window.secondPitch.mean() - window.firstPitch.mean()) <= 0.2;
+}
+// Qualify optional orientation references while idle; never command movement.
+void serviceReference() {
+    if (!commandIdle() || !fresh(millis()) || referenceSet) { window.active = false; return; }
+    if (!window.active) { startBaseline(); return; }
+    if (millis() - window.started < BASELINE_MS) return;
+    if (stablePitchBaseline()) {
+        if (!pitchReady) queueText("REFERENCE: stable pitch available; manual readiness unchanged\n");
+        pitchReady = true; baselinePitch = window.pitch.mean(); pitchReadyYaw = heading.continuous;
+    }
+    if (stableBaseline()) {
+        baselineHeading = wrap360(heading.first + window.heading.mean());
+        northTargetContinuous = window.heading.mean() + shortestDifference(0, baselineHeading);
+        referenceSet = northUsable = pitchReady = true;
+        queueText("REFERENCE: qualified magnetic north available; no automatic movement\n");
+        window.active = false;
+    } else startBaseline();
 }
 bool axisProgress(Axis &axis, double error) {
     const double magnitude = fabs(error); const uint32_t now = millis(); axis.error = error;
@@ -415,6 +494,21 @@ void serviceAxis(Axis &axis, uint32_t now) {
     commandAxis(axis);
 }
 void serviceAxes() {
+    if (!poseNeedsBno) {
+        if (carriagePending) {
+            if (carriageMotor->setAcceleration(CARRIAGE_ACCELERATION) != 0 ||
+                carriageMotor->setSpeedInHz(carriageRateHz) != 0 || carriageMotor->moveTo(carriageTarget) != MOVE_OK) {
+                abortTest("FastAccelStepper carriage pose command rejected"); return;
+            }
+            carriagePending = false;
+        }
+        if (!carriageMotor->isRunning()) {
+            if (carriageMotor->getCurrentPosition() == carriageTarget)
+                finish(true, "Carriage generated-step target reached; no orientation requested");
+            else abortTest("Carriage stopped before its requested target");
+        }
+        return;
+    }
     if ((!pitchReady && !referenceSet) || !fresh(millis())) return;
     // Cached values are useful for telemetry, but never constitute a new
     // control decision, direction confirmation, velocity or settling sample.
@@ -450,11 +544,9 @@ void serviceAxes() {
     if (now - settleStarted >= SETTLE_MS && settleSamples >= 30) {
         yawAxis.settled = referenceSet && fabs(yawAxis.error) <= TOLERANCE_DEG;
         pitchAxis.settled = true;
-        const bool evidence = sawYawMotion && sawPitchMotion && concurrentMotion;
         if (poseActive) finish(true, !referenceSet ? "Pitch target stopped and settled; yaw disabled, north unverified" :
             "POSE complete: BNO angle targets settled; carriage generated-step target reached");
-        else finish(evidence, evidence ? "Both measured axes stopped and settled at magnetic north and level" :
-            "Targets settled, but simultaneous two-axis motion was not demonstrated");
+        else finish(true, "Measured axes stopped and settled");
     }
 }
 void rejectPose(const char *reason) {
@@ -472,7 +564,28 @@ void resetPoseAxis(Axis &axis, double target, double timingPeak) {
 }
 void beginPose(double yawValue, double pitchValue, int64_t carriageValue, bool relative) {
     if (!commandIdle()) { rejectPose(finalPrinted ? "abort latched; reset required" : "busy; wait for READY"); return; }
-    if (!pitchReady || !fresh(millis()) || motionWatchdog.tripped()) {
+    if (!controlReady || yawMotor->isRunning() || pitchMotor->isRunning() || carriageMotor->isRunning()) {
+        rejectPose("initialized motor control and stopped motors required"); return;
+    }
+    const int64_t requestedCarriage = relative ? static_cast<int64_t>(carriageMotor->getCurrentPosition()) + carriageValue : carriageValue;
+    const int64_t carriageDelta = requestedCarriage - carriageMotor->getCurrentPosition();
+    if (requestedCarriage < INT32_MIN || requestedCarriage > INT32_MAX || carriageDelta < INT32_MIN || carriageDelta > INT32_MAX) {
+        rejectPose("carriage target and displacement must fit signed 32-bit step counts"); return;
+    }
+    if (relative && yawValue == 0 && pitchValue == 0) {
+        if (!carriageDelta) { queueText("POSE ALREADY AT TARGET: no motion\n"); return; }
+        const double duration = milestone8::finiteSeconds(fabs(static_cast<double>(carriageDelta)), CARRIAGE_MAX_SPEED_HZ, CARRIAGE_ACCELERATION);
+        if (!isfinite(duration) || duration * 1000 >= LEG_TIMEOUT_MS - SETTLE_MS) {
+            rejectPose("estimated carriage move cannot meet existing motion deadline"); return;
+        }
+        poseNeedsBno = false; yawRequired = accuracyRequired = false;
+        operation = Operation::POSE; poseActive = true; finalPrinted = false; phase = Phase::MOVING;
+        carriageTarget = static_cast<int32_t>(requestedCarriage); carriagePending = true;
+        carriageRateHz = CARRIAGE_MAX_SPEED_HZ; plannedDurationSeconds = duration;
+        controlStartedAt = millis(); window.active = false;
+        queueText("POSE ACCEPTED: relative carriage steps; angular axes stationary\n"); return;
+    }
+    if (!pitchReady || !fresh(millis()) || !bnoWatchdogReady || !motionWatchdog.clearTripWhenStopped()) {
         rejectPose("fresh valid BNO orientation and intact pitch baseline required"); return;
     }
     if (relative && (yawValue < -180.0 || yawValue >= 180.0)) {
@@ -480,16 +593,12 @@ void beginPose(double yawValue, double pitchValue, int64_t carriageValue, bool r
     }
     const double requestedYaw = relative ? static_cast<double>(orientation.heading) + yawValue : yawValue;
     const double requestedPitch = relative ? static_cast<double>(orientation.roll) + pitchValue : pitchValue;
-    const int64_t requestedCarriage = relative ? static_cast<int64_t>(carriageMotor->getCurrentPosition()) + carriageValue : carriageValue;
     if (!isfinite(requestedYaw) || !isfinite(requestedPitch) || fabs(requestedPitch) >= MAX_USABLE_PITCH_DEG) {
         rejectPose("finite yaw/pitch required; pitch target must be inside +/-75 degrees"); return;
     }
     const double targetYaw = heading.continuous + shortestDifference(requestedYaw, orientation.heading);
     if (referenceSet && fabs(targetYaw - northTargetContinuous) >= RELATIVE_LIMIT_DEG) {
         rejectPose("shortest yaw path endpoint exceeds existing +/-185-degree continuous north guard"); return;
-    }
-    if (requestedCarriage < -CARRIAGE_LIMIT_STEPS || requestedCarriage > CARRIAGE_LIMIT_STEPS) {
-        rejectPose("carriage target outside +/-500 startup-relative STEPS; millimeters unavailable"); return;
     }
     const double yawError = targetYaw - heading.continuous, pitchError = requestedPitch - orientation.roll;
     const bool moveYaw = fabs(yawError) > TOLERANCE_DEG, movePitch = fabs(pitchError) > TOLERANCE_DEG;
@@ -498,16 +607,19 @@ void beginPose(double yawValue, double pitchValue, int64_t carriageValue, bool r
     if (pitchOnly && moveYaw) {
         rejectPose("yaw disabled: calibrated north baseline and BNO accuracy >=2 required"); return;
     }
-    if (pitchOnly && carriageDistance != 0) {
-        rejectPose("pitch-only readiness: carriage motion still requires calibrated north and accuracy >=2"); return;
-    }
     if (pitchOnly) {
-        if (!movePitch) { queueText("POSE ALREADY AT TARGET: no motion; yaw disabled\n"); return; }
+        if (!movePitch && carriageDistance == 0) { queueText("POSE ALREADY AT TARGET: no motion; yaw disabled\n"); return; }
+        if (milestone8::finiteSeconds(carriageDistance, CARRIAGE_MAX_SPEED_HZ, CARRIAGE_ACCELERATION) * 1000 >= LEG_TIMEOUT_MS - SETTLE_MS) {
+            rejectPose("estimated carriage move cannot meet existing motion deadline"); return;
+        }
         // A startup timing measurement may not exist here. Run the existing
         // native pitch controller without inventing a pulses/degree estimate.
         resetPoseAxis(yawAxis, heading.continuous, yawTimingPeak);
         resetPoseAxis(pitchAxis, requestedPitch, pitchTimingPeak);
         yawRequired = accuracyRequired = false;
+        poseNeedsBno = true;
+        carriageTarget = static_cast<int32_t>(requestedCarriage); carriagePending = carriageDistance > 0;
+        carriageRateHz = CARRIAGE_MAX_SPEED_HZ;
         yawRateCap = YAW_SLEW_SPEED_HZ; pitchRateCap = PITCH_SLEW_SPEED_HZ;
         plannedDurationSeconds = 0; timingLimited = true;
         operation = Operation::POSE; poseActive = true; finalPrinted = false; phase = Phase::MOVING;
@@ -516,11 +628,11 @@ void beginPose(double yawValue, double pitchValue, int64_t carriageValue, bool r
         controlStartedAt = millis(); lastControlSample = bnoHealth.freshSamples;
         recordTimingStarts();
         if (!motionWatchdog.arm(lastBnoGood)) { abortTest("BNO watchdog could not arm for pitch-only motion"); return; }
-        queueText("PITCH-ONLY ACCEPTED: native pitch control; yaw disabled; carriage stationary\n");
+        queueText("PITCH-ONLY ACCEPTED: native pitch control; yaw stationary; carriage uses requested steps\n");
         safety(); return;
     }
     if ((moveYaw && yawPulsesPerDegree <= 0) || (movePitch && pitchPulsesPerDegree <= 0)) {
-        rejectPose("angular timing response unavailable: reset with modest yaw/pitch offsets for the existing north/level run"); return;
+        rejectPose("angular timing response unavailable; manual control remains ready (no automatic calibration movement)"); return;
     }
     if (!moveYaw && !movePitch && carriageDistance == 0) {
         queueText("POSE ALREADY AT TARGET: no motion; carriage units=STEPS from startup zero\n"); return;
@@ -555,7 +667,8 @@ void beginPose(double yawValue, double pitchValue, int64_t carriageValue, bool r
     }
     resetPoseAxis(yawAxis, targetYaw, yawTimingPeak); resetPoseAxis(pitchAxis, requestedPitch, pitchTimingPeak);
     yawRequired = moveYaw;
-    accuracyRequired = moveYaw || carriageDistance > 0;
+    accuracyRequired = moveYaw;
+    poseNeedsBno = true;
     carriageTarget = static_cast<int32_t>(requestedCarriage); carriagePending = carriageDistance > 0;
     operation = Operation::POSE; poseActive = true; finalPrinted = false; phase = Phase::MOVING;
     settleSamples = 0; window.active = false; accuracyGrace = {};
@@ -598,7 +711,7 @@ void serviceCommands() {
     for (unsigned n = 0; n < 32 && Serial.available(); ++n) {
         const int input = Serial.read();
         if (input == 'X' || input == 'x') {
-            commandLength = 0; commandOverflow = false; abortTest("Operator X abort"); return;
+            commandLength = 0; commandOverflow = false; abortTest("Operator X abort", true); return;
         }
         if (input == '\r' || input == '\n') {
             if (commandOverflow) rejectPose("command line too long");
@@ -639,25 +752,87 @@ void telemetry() {
         queueText(poseLine);
     }
 }
+void sensorTelemetry() {
+    const uint32_t now = millis();
+    char line[850];
+    snprintf(line, sizeof(line), "BNO_STATE available=%s fresh=%s age_ms=%lu accuracy=%u north_usable=%s heading=%.3f pitch_roll=%.3f has_sample=%s accepted_seq=%u accepted_sensor_us=%llu accepted_rx_ms=%lu\n",
+        bnoInitialized && reportEnabled ? "YES" : "NO", fresh(now) ? "YES" : "NO",
+        static_cast<unsigned long>(now - lastBnoGood), bnoAccuracy, northUsable && fresh(now) ? "YES" : "NO",
+        orientation.heading, orientation.roll, bnoHealth.freshSamples ? "YES" : "NO", acceptedBnoSequence,
+        static_cast<unsigned long long>(acceptedBnoTimestamp), static_cast<unsigned long>(lastBnoGood));
+    queueText(line);
+    const auto &raw = bnoDiagnostics;
+    snprintf(line, sizeof(line), "BNO_REPORT seen=%s report_id=0x%02X raw_status=%u seq=%u sensor_us=%llu age_ms=%lu observed_events=%lu rotation_events=%lu other_events=%lu status0=%lu status1=%lu status2=%lu status3=%lu status_changes=%lu invalid_vectors=%lu resets=%lu report_failures=%lu tx_dropped=%lu\n",
+        raw.events ? "YES" : "NO", raw.lastReport, raw.lastStatus, raw.lastSequence,
+        static_cast<unsigned long long>(raw.lastTimestamp), static_cast<unsigned long>(raw.events ? now - raw.lastEventAt : UINT32_MAX),
+        static_cast<unsigned long>(raw.events), static_cast<unsigned long>(raw.rotations), static_cast<unsigned long>(raw.otherReports),
+        static_cast<unsigned long>(raw.statusCounts[0]), static_cast<unsigned long>(raw.statusCounts[1]),
+        static_cast<unsigned long>(raw.statusCounts[2]), static_cast<unsigned long>(raw.statusCounts[3]),
+        static_cast<unsigned long>(raw.statusChanges), static_cast<unsigned long>(invalidVectors),
+        static_cast<unsigned long>(bnoResets), static_cast<unsigned long>(reportFailures), static_cast<unsigned long>(telemetryDrops));
+    queueText(line);
+    const auto &q = raw.rotation;
+    // Nine significant digits preserve library float components for comparison.
+    // No quaternion is synthesized for unrelated reports or a never-seen sensor.
+    const double norm = raw.rotations ? static_cast<double>(q.real)*q.real + static_cast<double>(q.i)*q.i +
+        static_cast<double>(q.j)*q.j + static_cast<double>(q.k)*q.k : NAN;
+    snprintf(line, sizeof(line), "BNO_RAW has_sample=%s report_id=0x%02X seq=%u sensor_us=%llu rx_ms=%lu age_ms=%lu raw_status=%u q_w=%.9g q_x=%.9g q_y=%.9g q_z=%.9g heading_accuracy_rad=%.9g norm_sq=%.9g euler_valid=%s yaw_deg=%.9g pitch_deg=%.9g roll_deg=%.9g accepted=%s reason=%s diagnostic_quality=%s malformed_total=%lu\n",
+        raw.rotations ? "YES" : "NO", SH2_ROTATION_VECTOR, raw.sequence, static_cast<unsigned long long>(raw.timestamp),
+        static_cast<unsigned long>(raw.rotationAt), static_cast<unsigned long>(raw.rotations ? now - raw.rotationAt : UINT32_MAX),
+        raw.status, raw.rotations ? q.real : NAN, raw.rotations ? q.i : NAN, raw.rotations ? q.j : NAN, raw.rotations ? q.k : NAN,
+        raw.rotations ? q.accuracy : NAN, norm, raw.eulerValid ? "YES" : "NO",
+        raw.euler.heading, raw.euler.pitch, raw.euler.roll, raw.accepted ? "YES" : "NO", raw.reason,
+        !raw.rotations ? "NO_SAMPLE" : (raw.plausible ? "PLAUSIBLE" : "MALFORMED"), (unsigned long)raw.malformed);
+    queueText(line);
+    snprintf(line, sizeof(line), "BNO_IO at_ms=%lu calls=%lu failures=%lu slow=%lu max_us=%lu acquire_max_us=%lu encB_service_max_us=%lu reset_events=%lu product_generation=%lu queried_generation=%lu trace_dropped=%lu sample_handoff_dropped=%lu\n",
+        (unsigned long)now, (unsigned long)bnoTrace.ioCalls, (unsigned long)bnoTrace.ioFailures,
+        (unsigned long)bnoTrace.ioSlow, (unsigned long)bnoTrace.ioMaxUs, (unsigned long)bnoTrace.acquireMaxUs,
+        (unsigned long)bnoTrace.encoderMaxUs, (unsigned long)bnoTrace.resetEvents,
+        (unsigned long)bnoTrace.productGeneration, (unsigned long)bnoTrace.queriedGeneration, (unsigned long)bnoTrace.dropped, (unsigned long)sensorSampleDrops);
+    queueText(line);
+    for (unsigned index = 0; index < 2; ++index) {
+        const auto &sample = encoders.state(index);
+        snprintf(line, sizeof(line), "ENCODER_STATE bus=%c available=%s valid=%s raw=%u angle_deg=%.3f age_ms=%lu status=0x%02X magnet_good=%s failures=%lu\n",
+            index ? 'B' : 'A', sample.available ? "YES" : "NO", sample.valid ? "YES" : "NO",
+            sample.raw, sample.angleDegrees(), static_cast<unsigned long>(sample.ageMs(now)), sample.status,
+            sample.magnetGood() ? "YES" : "NO", static_cast<unsigned long>(sample.failures));
+        queueText(line);
+    }
+}
 } // namespace
 
+// Called synchronously by the locally instrumented pinned library. The callback
+// timestamp is MCU observation time, not an assertion about physical reset time.
+extern "C" void m09_bno_io(uint32_t start, uint32_t duration, unsigned stage, unsigned bytes, int ok) {
+    sensorWorker.onIo(start, duration, stage, bytes, ok);
+}
+extern "C" void m09_bno_reset(uint32_t transportUs) {
+    sensorWorker.onReset(transportUs);
+}
+extern "C" void m09_bno_product(uint32_t transportUs, uint8_t cause, uint32_t part, uint32_t build) {
+    sensorWorker.onProduct(transportUs, cause, part, build);
+}
+extern "C" void m09_bno_init_response(uint32_t transportUs) {
+    sensorWorker.onInitResponse(transportUs);
+}
+
+#ifdef M07_HOST_TEST
+void loop();
+void sensorWorkerTestWait(uint32_t duration) {
+    const uint32_t start = millis();
+    while (millis()-start < duration) loop();
+}
+#endif
+
 void setup() {
-    Serial.begin(115200); delay(500);
+    Serial.begin(115200);
     for (const uint8_t pin : {tmp_hardware::YAW_STEP_PIN, tmp_hardware::PITCH_STEP_PIN, tmp_hardware::CARRIAGE_STEP_PIN}) { pinMode(pin, OUTPUT); digitalWrite(pin, LOW); }
-    Serial.println("M09_xbox_control: host Xbox velocity commands; preserved M08 startup and POSE/MOVE");
-    Serial.println("Yaw DIR32/STEP33; pitch DIR26/STEP12; carriage DIR21/STEP22; BNO085 Bus B SDA4/SCL5 address 0x4A");
-    Serial.println("Physical PITCH feedback = BNO ROLL; pitch targets and telemetry use roll degrees.");
-    Serial.println("Carriage zero is startup step count only; units are STEPS, not mm. Software envelope +/-500 steps; no homing.");
-    Serial.println("North requires calibrated baseline and BNO accuracy >=2; low accuracy stops yaw operations. Independent 150 ms stale stop for all motion.");
-    Serial.println("Stable fresh pitch can enter PITCH-ONLY READY after north-baseline timeout, regardless of accuracy. No automatic fallback motion.");
-    Serial.print("Yaw trial sign="); Serial.print(TRIAL_POSITIVE_STEP_YAW_SIGN); Serial.print("; current pitch sign="); Serial.println(POSITIVE_STEP_PITCH_SIGN);
-    Serial.println("X/x aborts; yaw may take up to 180 deg shortest path to north. Clear the intended path and cables.");
-    Serial.print("Measured yaw guard +/-"); Serial.print(RELATIVE_LIMIT_DEG, 0);
-    Serial.println(" deg from continuous north target; pitch absolute guard +/-75 deg. Power removal is emergency stop.");
-    Serial.print("Slew yaw/pitch Hz="); Serial.print(YAW_SLEW_SPEED_HZ); Serial.print('/'); Serial.print(PITCH_SLEW_SPEED_HZ);
-    Serial.print(" accel="); Serial.print(YAW_SLEW_ACCELERATION); Serial.print('/'); Serial.println(PITCH_SLEW_ACCELERATION);
-    Serial.print("Approach yaw/pitch deg="); Serial.print(YAW_APPROACH_DEG); Serial.print('/'); Serial.print(PITCH_APPROACH_DEG);
-    Serial.println(" plus measured-rate braking margin. Continuous slew then stopped precision corrections.");
+    Serial.println("M09_xbox_control: manual velocity; optional AS5600/BNO telemetry; no automatic startup movement");
+    Serial.println("BNO_DIAGNOSTICS revision=sensor-worker-1 comparison=POST_RELOCATION_USER_REPORTED timestamp=header_receipt_us");
+    Serial.println("Yaw DIR32/STEP33; pitch DIR26/STEP12; carriage DIR21/STEP22. Physical pitch feedback = BNO ROLL.");
+    Serial.println("AS5600 Bus A SDA18/SCL19 and Bus B SDA4/SCL5 at 0x36; BNO Bus B at 0x4A.");
+    Serial.println("Manual travel is operator-supervised. Carriage steps are unhomed; no software position window.");
+    Serial.println("Centered JOG arms; STOP brakes; X/x latches abort. Continuous commands expire after 250 ms.");
     engine.init();
     yawMotor = engine.stepperConnectToPin(tmp_hardware::YAW_STEP_PIN); pitchMotor = engine.stepperConnectToPin(tmp_hardware::PITCH_STEP_PIN);
     carriageMotor = engine.stepperConnectToPin(tmp_hardware::CARRIAGE_STEP_PIN);
@@ -668,63 +843,40 @@ void setup() {
         yawMotor->setAcceleration(ACCELERATION) != 0 || pitchMotor->setAcceleration(ACCELERATION) != 0 ||
         carriageMotor->setSpeedInHz(CARRIAGE_MAX_SPEED_HZ) != 0 || carriageMotor->setAcceleration(CARRIAGE_ACCELERATION) != 0) { abortTest("FastAccelStepper configuration rejected"); return; }
     yawAxis = {}; pitchAxis = {}; yawAxis.motor = yawMotor; yawAxis.pitch = false; pitchAxis.motor = pitchMotor; pitchAxis.pitch = true; pitchAxis.confirmed = true;
-    if (!motionWatchdog.begin(yawMotor, pitchMotor, BNO_STALE_MS, carriageMotor)) { abortTest("Independent BNO watchdog initialization failed"); return; }
     if (!commandWatchdog.begin(yawMotor, pitchMotor, MANUAL_COMMAND_TIMEOUT_MS, carriageMotor)) { abortTest("Independent manual command watchdog initialization failed"); return; }
-    if (!Wire1.begin(tmp_hardware::I2C_BUS_B_SDA_PIN, tmp_hardware::I2C_BUS_B_SCL_PIN, 100000)) { abortTest("Required I2C Bus B initialization failed"); return; }
-    Wire1.setTimeOut(50); Wire1.beginTransmission(0x4A);
-    if (Wire1.endTransmission() != 0) { abortTest("Required BNO085 at Bus B 0x4A did not ACK"); return; }
-    bnoInitialized = bno.begin_I2C(0x4A, &Wire1);
-    if (!bnoInitialized || !enableReport()) { abortTest("BNO085 initialization/report enabling failed"); return; }
-    startedAt = lastBnoGood = millis(); bnoHealth.lastFreshOrStartMs = startedAt; phase = Phase::STARTUP;
+    bnoWatchdogReady = motionWatchdog.begin(yawMotor, pitchMotor, BNO_STALE_MS, carriageMotor);
+    if (!bnoWatchdogReady) queueText("BNO WARNING: feedback watchdog unavailable; angular POSE disabled\n");
+    controlReady = true;
+    startedAt = lastBnoGood = millis(); bnoHealth.lastFreshOrStartMs = startedAt;
+    yawRequired = accuracyRequired = false;
+    phase = Phase::COMPLETE; finalPrinted = true;
+    publishSensorContext();
+    if (!sensorWorker.start()) queueText("SENSOR WARNING: worker unavailable; manual control remains available\n");
+#ifdef M07_HOST_TEST
+    simulated::sensorWait = sensorWorkerTestWait;
+#endif
+    queueText("M09 READY\n");
 }
 void loop() {
     serviceCommands();
-    if (finalPrinted) {
-        if (commandIdle()) serviceBno();
-        serviceSerialOutput(); delay(1); return;
-    }
-    safety(); if (finalPrinted) return;
-    serviceBno(); if (finalPrinted) return;
-    if (phase == Phase::STARTUP) { if (millis() - startedAt >= STARTUP_MS) { phase = Phase::BASELINE; startBaseline(); } }
-    else if (phase == Phase::BASELINE) {
-        if (millis() - window.started >= BASELINE_MS) {
-            if (!stableBaseline()) {
-                if (millis() - startedAt < BASELINE_TIMEOUT_MS) startBaseline();
-                else if (!stablePitchBaseline()) abortTest("Stable fresh pitch baseline unavailable; inspect BNO and reset");
-                else {
-                    baselinePitch = window.pitch.mean(); pitchReadyYaw = heading.continuous;
-                    pitchReady = true; yawRequired = accuracyRequired = false; referenceSet = northUsable = false;
-                    window.active = false; controlStartedAt = millis();
-                    resetPoseAxis(yawAxis, heading.continuous, 0);
-                    resetPoseAxis(pitchAxis, orientation.roll, 0);
-                    safety(); if (finalPrinted) return;
-                    finalPrinted = true; phase = Phase::COMPLETE;
-                    txOffset = txLength = 0; // Preserve READY even after optional telemetry filled the UART buffer.
-                    queueText("PITCH-ONLY READY: stable fresh pitch; calibrated north unavailable, yaw disabled. MOVE 0 <pitch_delta_deg> 0; POSE <current_heading_deg> 0 0 levels pitch. Reset for calibrated north startup.\n");
-                }
-            }
-            else {
-                baselineHeading = wrap360(heading.first + window.heading.mean()); baselinePitch = window.pitch.mean();
-                northTargetContinuous = window.heading.mean() + shortestDifference(0, baselineHeading);
-                yawAxis.target = northTargetContinuous; pitchAxis.target = 0; referenceSet = northUsable = pitchReady = true;
-                window.active = false; accuracyGrace = {};
-                controlStartedAt = millis();
-                yawAxis.error = northTargetContinuous - heading.continuous;
-                yawAxis.initialError = yawAxis.bestError = yawAxis.progressError = fabs(yawAxis.error);
-                pitchAxis.error = -baselinePitch;
-                pitchAxis.initialError = pitchAxis.bestError = pitchAxis.progressError = fabs(pitchAxis.error);
-                yawAxis.lastProgress = pitchAxis.lastProgress = millis();
-                recordTimingStarts();
-                if (!motionWatchdog.arm(lastBnoGood)) { abortTest("BNO watchdog could not arm"); return; }
-                char line[120];
-                snprintf(line, sizeof(line), "NORTH REFERENCE heading_deg=%.3f accuracy=%u\n", baselineHeading, bnoAccuracy);
-                queueText(line);
-                phase = Phase::MOVING;
-            }
-        }
-    } else if (phase == Phase::MANUAL) serviceManual();
-    else if (phase == Phase::MOVING || phase == Phase::SETTLING) serviceAxes();
-    if (!finalPrinted && millis() - lastDisplay >= 750) { lastDisplay = millis(); telemetry(); }
+    if (phase == Phase::ABORTED) { publishSensorContext(); consumeSensorStatus(); serviceTraceOutput(); serviceSerialOutput(); delay(1); return; }
+    safety();
+    if (manualActive) serviceManual(); // STOP reaches motor braking before sensor calls.
+    serviceBno();
+    serviceCommands(); safety();
+    if (manualActive) serviceManual();
+    serviceCommands(); safety();
+    if (manualActive) serviceManual();
+    if (poseActive) serviceAxes();
+    serviceReference();
+    publishSensorContext();
+    serviceTraceOutput();
+    const uint32_t now = millis();
+    if (now - lastSensorDisplay >= 500) { lastSensorDisplay = now; sensorTelemetry(); }
+    if (!manualActive && now - lastDisplay >= 750) { lastDisplay = now; telemetry(); }
     serviceSerialOutput();
+#ifdef M07_HOST_TEST
+    sensorWorker.testDispatch();
+#endif
     delay(1);
 }

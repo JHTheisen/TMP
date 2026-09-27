@@ -1,7 +1,9 @@
 // Compile M08's preserved north/level startup against synthetic motors and BNO.
 // This tests decisions and asynchronous sequencing, not physical stopping margins,
 // torque, fusion lag, I2C electrical faults, or ESP32 task scheduling.
-#include "../src/main.cpp"
+// Historical automatic-startup expectations validate the immutable M08 baseline.
+// M09's fast, stationary startup is covered by m09_lifecycle_test.cpp.
+#include "../../M08_go_to_pose/src/main.cpp"
 #include <cstdio>
 #include <cstdlib>
 #include <string>

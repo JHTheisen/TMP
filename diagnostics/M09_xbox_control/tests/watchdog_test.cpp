@@ -143,6 +143,53 @@ void optionalCarriageStopsWithBothAngularAxes() {
     watchdog.check(1160);
     assert(!carriage->isRunning() && simulated::forceStops == before + 6);
 }
+void recoveryRequiresStoppedAndDisarmed() {
+    FastAccelStepperEngine engine;
+    engine.init();
+    FastAccelStepper *yaw = engine.stepperConnectToPin(33);
+    FastAccelStepper *pitch = engine.stepperConnectToPin(12);
+    FastAccelStepper *carriage = engine.stepperConnectToPin(22);
+    MotionWatchdog watchdog;
+    assert(!watchdog.configured());
+    assert(!watchdog.clearTripWhenStopped());
+    assert(watchdog.begin(yaw, pitch, 250, carriage));
+    assert(watchdog.configured());
+    assert(watchdog.arm(1000));
+    assert(watchdog.armed());
+    assert(!watchdog.clearTripWhenStopped());
+    watchdog.check(1250);
+    assert(watchdog.tripped());
+    assert(!watchdog.clearTripWhenStopped());
+    watchdog.disarm();
+    assert(!watchdog.armed());
+
+    // A single moving axis must prevent clearing the old stop, including the
+    // optional carriage. Clearing a trip is never itself a movement command.
+    for (FastAccelStepper *motor : {yaw, pitch, carriage}) {
+        assert(motor->runForward() == MOVE_OK);
+        assert(!watchdog.clearTripWhenStopped());
+        assert(watchdog.tripped());
+        motor->forceStop();
+    }
+    const size_t commandsBefore = simulated::commands.size();
+    assert(watchdog.clearTripWhenStopped());
+    assert(!watchdog.tripped() && !watchdog.armed());
+    assert(simulated::commands.size() == commandsBefore);
+    watchdog.check(100000);
+    assert(!watchdog.tripped());
+
+    // Rearming creates a new lease. An earlier captured callback timestamp
+    // must not interpret the new timestamp as a huge unsigned stale interval.
+    assert(watchdog.arm(200000));
+    assert(yaw->runForward() == MOVE_OK);
+    const unsigned stopsBefore = simulated::forceStops;
+    watchdog.check(1251);
+    watchdog.check(200249);
+    assert(yaw->isRunning() && !watchdog.tripped());
+    assert(simulated::forceStops == stopsBefore);
+    watchdog.check(200250);
+    assert(!yaw->isRunning() && watchdog.tripped());
+}
 } // namespace
 
 int main() {
@@ -152,5 +199,6 @@ int main() {
     wraparoundAndConcurrentTimestamp();
     disarmedAndInitializationFailures();
     optionalCarriageStopsWithBothAngularAxes();
-    std::cout << "M08 watchdog tests passed (two- and three-axis deterministic decisions, not ESP scheduling).\n";
+    recoveryRequiresStoppedAndDisarmed();
+    std::cout << "M09 watchdog tests passed (stopped recovery and two-/three-axis decisions, not ESP scheduling).\n";
 }
