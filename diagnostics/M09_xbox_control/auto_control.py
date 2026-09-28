@@ -1,4 +1,4 @@
-"""Single-request Xbox AUTO protocol; no serial, pygame, or hardware access."""
+﻿"""Single-request manual/keyframe workflow; no pygame, serial or hardware access."""
 from dataclasses import dataclass
 
 
@@ -11,22 +11,30 @@ class Keyframe:
 
 
 class AutoSession:
-    """In-memory A/B captures and explicit, correlated autonomous requests."""
+    """Keyframe actions are available from manual; only active actions gate JOG."""
     def __init__(self):
-        self.enabled = False
-        self.phase = "OFF"
-        self.note = "Y: enter AUTO; manual arming remains separate."
+        self.enabled = True
+        self.phase = "READY"
+        self.note = "Manual positioning; LB/RB capture, Home plays A to B."
         self.increment = 1
         self.duration = 10
         self.frames = {}
         self.epoch = None
         self.request_id = 0
-        self.pending_id = None
-        self.purpose = None
-        self.deadline = None
-        self.last_rx = None
+        self.pending_id = self.purpose = self.deadline = self.last_rx = None
         self.continuation = None
         self.last_command = ""
+        self.action = None
+        self.play_duration = 10
+        self.settle_until = None
+
+    @property
+    def busy(self):
+        return self.phase not in ("READY", "OFF", "FAULT")
+
+    @property
+    def overridable(self):
+        return self.busy and self.action not in (None, "capture_a", "capture_b")
 
     def invalidate(self, reason):
         self.frames.clear()
@@ -34,20 +42,19 @@ class AutoSession:
         self.note = "Captures cleared: " + reason
 
     def cancel(self, now, reason="STOP sent; wait for READY."):
-        self.phase = "STOPPING" if self.enabled else "OFF"
-        self.pending_id = self.purpose = self.continuation = None
-        self.deadline = now + 4.0 if self.enabled else None
+        self.phase = "STOPPING"
+        self.pending_id = self.purpose = self.continuation = self.action = None
+        self.settle_until = None
+        self.deadline = now + 4.0
         self.note = reason
 
     def enter(self, now):
         self.enabled = True
-        self.increment = 1
         self.last_rx = now
         self.cancel(now)
 
     def leave(self, now):
-        self.enabled = False
-        self.cancel(now, "Manual disarmed; center sticks and arm deliberately.")
+        self.cancel(now)
 
     def _new_request(self, purpose, phase, now):
         self.request_id = self.request_id % 4294967295 + 1
@@ -61,33 +68,35 @@ class AutoSession:
         self.last_command = line
         return (line + "\n").encode("ascii")
 
+    def _snapshot(self, now):
+        ident = self._new_request(self.action, "SNAPSHOT", now)
+        self.continuation = self._command(f"SNAP {ident}")
+
     def request(self, action, now, centered):
-        """Return one command or a refusal. Rejected requests are never queued."""
-        if not self.enabled or self.phase != "READY" or not centered:
-            self.note = "Not queued: wait for READY, centered sticks and released controls."
+        if not self.enabled or self.phase != "READY":
+            self.note = "Not queued: wait for current action to finish and release controls."
             return None
-        if action in ("capture_a", "capture_b", "return_a", "play"):
-            if action in ("return_a", "play") and "A" not in self.frames:
-                self.note = "Capture A first."
-                return None
-            if action == "play" and "B" not in self.frames:
-                self.note = "Capture B first."
-                return None
-            ident = self._new_request(action, "SNAPSHOT", now)
-            self.note = "Waiting for a fresh stopped snapshot."
-            return self._command(f"SNAP {ident}")
-        moves = {"pitch_up": (0, self.increment), "pitch_down": (0, -self.increment),
-                 "yaw_right": (self.increment, 0), "yaw_left": (-self.increment, 0)}
-        if action not in moves:
+        if action not in ("capture_a", "capture_b") and not centered:
+            self.note = "Not queued: center sticks before requesting movement."
             return None
-        yaw, pitch = moves[action]
-        self._new_request(action, "MOVE_PENDING", now)
-        self.note = "MOVE requested; firmware checks sensor/reference validity."
-        return self._command(f"MOVE {yaw} {pitch} 0")
+        if action in ("return_a", "play") and "A" not in self.frames:
+            self.note = "Capture A first."
+            return None
+        if action == "play" and "B" not in self.frames:
+            self.note = "Capture B first."
+            return None
+        self.action = action
+        self.play_duration = self.duration
+        self.phase = "PREFLIGHT_STOP"
+        self.pending_id = self.continuation = None
+        self.last_rx = now
+        self.deadline = now + 4.0
+        self.note = "Stopping manual motion before a fresh position request."
+        return self._command("STOP")
 
     def _finish(self, note):
         self.phase = "FINISH_WAIT"
-        self.pending_id = self.purpose = self.continuation = None
+        self.pending_id = self.purpose = self.continuation = self.action = None
         self.note = note + " Waiting for READY."
 
     def receive(self, line, now):
@@ -95,23 +104,32 @@ class AutoSession:
         fields = dict(token.split("=", 1) for token in line.split() if "=" in token)
         if line.startswith(("M09_xbox_control:", "KEYFRAME_INVALIDATED ")) or line == "M09 ABORTED":
             self.invalidate(line)
-            if self.enabled:
-                self.cancel(now, self.note)
-                if line == "M09 ABORTED":
-                    self.phase = "FAULT"
-                    self.deadline = None
-                    self.note += "; firmware abort is latched; reset required."
-            return
-        if not self.enabled:
+            self.cancel(now, self.note)
+            if line == "M09 ABORTED":
+                self.phase = "FAULT"
+                self.deadline = None
+                self.note += "; firmware abort is latched; reset required."
             return
         if line == "M09 READY":
-            # A READY polling reply alone cannot acknowledge any request.
-            if self.phase in ("STOPPING", "FINISH_WAIT"):
+            if self.phase == "PREFLIGHT_STOP":
+                if self.action in ("capture_a", "capture_b", "return_a", "play"):
+                    self._snapshot(now)
+                else:
+                    moves = {"pitch_up": (0, self.increment), "pitch_down": (0, -self.increment),
+                             "yaw_right": (self.increment, 0), "yaw_left": (-self.increment, 0)}
+                    yaw, pitch = moves[self.action]
+                    self._new_request(self.action, "MOVE_PENDING", now)
+                    self.continuation = self._command(f"MOVE {yaw} {pitch} 0")
+            elif self.phase == "RETURN_WAIT":
+                self.phase = "AT_A_SETTLE"
+                self.settle_until = now + .2
+                self.deadline = now + 4.0
+                self.note = "Generated-step return complete; checking stopped A before timed playback."
+            elif self.phase in ("STOPPING", "FINISH_WAIT"):
                 self.phase = "READY"
                 self.deadline = None
-                self.note = self.note.replace(" Waiting for READY.", "")
             return
-        matching = fields.get("id") == str(self.pending_id)
+        matching = self.pending_id is not None and fields.get("id") == str(self.pending_id)
         if line.startswith("KEYFRAME_SNAPSHOT ") and matching and self.phase == "SNAPSHOT":
             try:
                 epoch = int(fields["epoch"])
@@ -122,78 +140,80 @@ class AutoSession:
                 self.note = "Malformed snapshot ignored; waiting for correlated valid response."
                 return
             if self.epoch is not None and epoch != self.epoch:
-                self.invalidate("firmware position epoch changed; capture A and B again")
+                self.invalidate("firmware position epoch changed")
                 self._finish(self.note)
                 return
             self.epoch = epoch
             snapshot = Keyframe(epoch, steps, fields.get("heading", "?"), fields.get("physical_pitch", "?"))
-            if self.purpose in ("capture_a", "capture_b"):
-                slot = "A" if self.purpose == "capture_a" else "B"
+            if self.action in ("capture_a", "capture_b"):
+                slot = "A" if self.action == "capture_a" else "B"
                 self.frames[slot] = snapshot
-                self.phase = "READY"  # The correlated reply itself guarantees stopped READY.
-                self.pending_id = self.purpose = self.deadline = None
+                self.phase = "READY"
+                self.pending_id = self.purpose = self.deadline = self.action = None
                 self.note = f"Captured {slot}: steps {steps}; startup-relative and unhomed."
                 return
-            if self.purpose == "play" and steps != self.frames["A"].steps:
-                self._finish("Play refused: not at A. Press left-stick click to return to A first.")
+            at_a = steps == self.frames["A"].steps
+            if self.purpose == "verify_a" and not at_a:
+                self._finish("Stopped A verification failed; playback canceled.")
                 return
-            target = self.frames["B" if self.purpose == "play" else "A"]
+            travel = self.action == "return_a" or not at_a
+            target = self.frames["A" if travel else "B"]
             if target.epoch != epoch:
                 self.invalidate("keyframe epoch mismatch")
                 self._finish(self.note)
                 return
-            ident = self._new_request(self.purpose, "KEYMOVE_PREPARED", now)
-            self.continuation = self._command(f"KEYMOVE {ident} {epoch} {target.steps[0]} {target.steps[1]} {target.steps[2]} {self.duration * 1000}")
-            self.note = "Stopped position verified; preparing one finite transition."
-        elif matching and line.startswith(("SNAP REJECTED ", "KEYMOVE REJECTED ")):
+            ident = self._new_request("return" if travel else "play", "KEYMOVE_PREPARED", now)
+            line = f"{'KEYRETURN' if travel else 'KEYMOVE'} {ident} {epoch} {target.steps[0]} {target.steps[1]} {target.steps[2]}"
+            self.continuation = self._command(line if travel else line + f" {self.play_duration * 1000}")
+            self.note = "Returning to A at travel speed." if travel else "Timed A to B; generated-step endpoints only."
+        elif matching and line.startswith(("SNAP REJECTED ", "KEYMOVE REJECTED ", "KEYRETURN REJECTED ")):
             self._finish(line)
             self.deadline = now + 4.0
         elif matching and self.phase == "KEYMOVE_PENDING" and line.startswith("KEYMOVE ACCEPTED "):
             self.phase = "KEYMOVE_ACTIVE"
-            self.deadline = now + self.duration + 5.0
-            self.note = "Playing generated steps; measured-angle settling is not claimed."
+            self.deadline = now + (65 if self.purpose == "return" else self.play_duration + 5)
         elif matching and self.phase in ("KEYMOVE_PENDING", "KEYMOVE_ACTIVE") and line.startswith("KEYMOVE RESULT "):
             if fields.get("status") == "FAILED":
                 self.invalidate("keyframe motion failed")
-            self._finish(line)
+            if fields.get("status") == "PASS" and self.purpose == "return" and self.action == "play":
+                self.phase = "RETURN_WAIT"
+                self.pending_id = self.continuation = None
+            else:
+                self._finish(line)
             self.deadline = now + 4.0
         elif self.phase == "MOVE_PENDING" and line.startswith(("POSE ACCEPTED", "PITCH-ONLY ACCEPTED")):
             self.phase = "MOVE_ACTIVE"
-            self.deadline = now + 95.0  # Existing firmware POSE timeout is 90 s.
-            self.note = "Angular MOVE active; further movement presses are not queued."
+            self.deadline = now + 95.0
         elif self.phase == "MOVE_PENDING" and line.startswith(("POSE REJECTED:", "POSE ALREADY AT TARGET:")):
             self._finish(line)
             self.deadline = now + 4.0
         elif self.phase == "MOVE_ACTIVE" and ("FINAL RESULT:" in line or line.startswith("OPERATION FAILED:")):
-            if "FAIL" in line:
-                self.invalidate("angular operation failed")
             self._finish(line)
             self.deadline = now + 4.0
 
     def frame(self, now):
-        """Timeout STOP or a bounded follow-up to the same deliberate request."""
-        if not self.enabled:
-            return None
-        if self.phase not in ("READY", "FAULT") and (
-                (self.deadline is not None and now >= self.deadline) or
-                (self.last_rx is not None and now - self.last_rx > 3.0)):
-            self.invalidate("autonomous acknowledgment/telemetry timed out")
-            self.pending_id = self.purpose = self.continuation = None
+        if self.busy and ((self.deadline is not None and now >= self.deadline) or
+                          (self.last_rx is not None and now - self.last_rx > 3.0)):
+            self.invalidate("autonomous acknowledgment/telemetry timed out; coordinate confidence unknown")
+            self.cancel(now, self.note)
             self.phase = "FAULT"
             self.deadline = None
-            self.note += "; STOP sent. Toggle Y off/on for deliberate recovery."
             return b"STOP\n"
+        if self.phase == "AT_A_SETTLE" and now >= self.settle_until:
+            self._snapshot(now)
+            self.purpose = "verify_a"
         if self.continuation is not None:
             command, self.continuation = self.continuation, None
-            self.phase = "KEYMOVE_PENDING"
-            self.deadline = now + 4.0
+            if self.phase == "KEYMOVE_PREPARED":
+                self.phase = "KEYMOVE_PENDING"
+                self.deadline = now + 4.0
             return command
         return None
 
     def display_lines(self):
         captures = " | ".join(f"{slot}={self.frames[slot].steps if slot in self.frames else 'not saved'}" for slot in ("A", "B"))
-        return [f"AUTO | {self.phase} | JOG DISABLED | increment {self.increment} deg | duration {self.duration} s",
+        return [f"MANUAL + KEYFRAMES | {self.phase} | increment {self.increment} deg | duration {self.duration} s",
                 "LB (4): capture A | RB (5): capture B | X button (2): duration | Home (10): Play A->B",
                 "LS click (8): return A | RS click (9): 1/2 deg | D-pad: up/down pitch, right/left yaw",
-                "A/Space/F12: STOP | B / keyboard X: abort | Y (3): manual disarmed",
+                "A/Space/F12: STOP | B / keyboard X: abort | Move sticks to take over automatic motion",
                 f"Generated steps (startup-relative, unhomed): {captures}", self.note]

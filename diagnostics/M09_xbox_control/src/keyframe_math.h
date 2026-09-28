@@ -13,6 +13,20 @@ struct AxisPlan {
     bool moving = false;
 };
 
+inline double minimumSeconds(double distance, double speed, double acceleration) {
+    return distance <= speed * speed / acceleration ? 2 * sqrt(distance / acceleration) :
+        distance / speed + speed / acceleration;
+}
+inline const char *failureReason(int32_t current, int32_t target, uint32_t ms,
+                                 uint32_t speed, int32_t acceleration) {
+    const int64_t delta = static_cast<int64_t>(target) - current;
+    if (delta < INT32_MIN || delta > INT32_MAX) return "signed displacement overflow";
+    if (ms < MIN_DURATION_MS || ms > MAX_DURATION_MS) return "duration outside 1000..60000 ms";
+    if (ms / 1000.0 < minimumSeconds(fabs(static_cast<double>(delta)), speed, acceleration))
+        return "duration too short for speed/acceleration caps";
+    return "step resolution or rounded profile timing; shorten duration for sparse moves";
+}
+
 // All axes target one wall-clock duration. Start with a 20% acceleration /
 // 60% cruise / 20% deceleration profile. FastAccelStepper accepts integer
 // acceleration; solve the cruise speed again after rounding that acceleration.
@@ -29,10 +43,10 @@ inline bool planAxis(int32_t current, int32_t target, uint32_t durationMs,
     const double distance = fabs(static_cast<double>(delta));
     const double seconds = durationMs / 1000.0;
     const double ramp = seconds * 0.2;
-    const double acceleration = ceil(distance / (ramp * (seconds - ramp)));
+    const double acceleration = fmin(maxAcceleration, ceil(distance / (ramp * (seconds - ramp))));
     if (!isfinite(acceleration) || acceleration < 1 || acceleration > maxAcceleration) return false;
     const double discriminant = seconds * seconds - 4 * distance / acceleration;
-    if (discriminant <= 0) return false;
+    if (discriminant < 0) return false;
     // Stable form of the smaller quadratic root for long, slow moves.
     const double speed = 2 * distance / (seconds + sqrt(discriminant));
     const double milliHz = round(speed * 1000);

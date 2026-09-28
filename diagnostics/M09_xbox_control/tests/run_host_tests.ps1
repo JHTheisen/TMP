@@ -41,7 +41,7 @@ try {
     Run-Cases 'pose_integration' @('coordinated','relative','pitch_low','pitch_carriage_low','no_op','invalid','stale',
         'blocked_bno','invalid_feedback','wrong_report','accuracy','reset','runaway','pitch_guard','no_progress','timeout','abort')
     Build-Test 'pose_restoration_test.cpp' 'pose_restoration'
-    Run-Cases 'pose_restoration' @('first_pose','first_carriage','pitch_low','fallback_bounds','admission','yaw_hold','yaw_recovered',
+    Run-Cases 'pose_restoration' @('first_pose','first_carriage','pitch_low','unqualified','fallback_bounds','admission','yaw_hold','yaw_recovered',
         'velocity_receipt','observe_receipt','settle_receipt','sample_order','receipt_rollover','baseline_receipt')
     Build-Test 'pose_stop_test.cpp' 'pose_stop'
     Run-Cases 'pose_stop' @('angular','carriage','pending','repeat','timeout','stall','abort')
@@ -49,7 +49,7 @@ try {
     & '.pio/host_tests/keyframe_math.exe'
     if ($LASTEXITCODE -ne 0) { throw 'Keyframe timing math failed' }
     Build-Test 'keyframe_motion_test.cpp' 'keyframe_motion'
-    Run-Cases 'keyframe_motion' @('snapshot','reject','admission','configuration','partial_start',
+    Run-Cases 'keyframe_motion' @('snapshot','reject','admission','travel','missing_bno','stall_continue','configuration','partial_start',
         'complete','zero_axis','no_op','stop','brake_timeout','abort','stale','reset','pitch_guard','stall_stop','unexpected_stop')
     # Keep old startup/fallback regression evidence against M08, which is unchanged.
     Build-Test 'north_level_integration_test.cpp' 'm08_startup'

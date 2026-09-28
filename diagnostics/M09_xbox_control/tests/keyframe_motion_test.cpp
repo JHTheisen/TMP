@@ -51,8 +51,9 @@ int main(int argc, char **argv) {
     simulated::physicalPitchUsesRoll = false;
     simulated::baselineYaw = 20; simulated::baselinePitch = 8;
     simulated::accuracy = 1; simulated::independentTick = tick;
+    if (scenario == "missing_bno") simulated::bnoInitFails = true;
     setup(); advance(2200);
-    CHECK(commandIdle() && pitchReady && !northUsable);
+    CHECK(commandIdle() && (pitchReady || scenario == "missing_bno") && !northUsable);
     const uint32_t epoch = snapshot(1);
     CHECK(epoch != 0);
     CHECK(Serial.output.find("yaw_steps=0 pitch_steps=0 carriage_steps=0") != std::string::npos);
@@ -68,6 +69,8 @@ int main(int argc, char **argv) {
     } else if (scenario == "reject") {
         for (const auto &bad : {
              "KEYMOVE 2 " + std::to_string(epoch) + " 999999 1 1 1000",
+             "KEYMOVE 20 " + std::to_string(epoch) + " 0 999999 0 1000",
+             "KEYMOVE 21 " + std::to_string(epoch) + " 160 -320 999999 1000",
              "KEYMOVE 3 " + std::to_string(epoch) + " 1 1 1 0",
              "KEYMOVE 4 " + std::to_string(epoch) + " 1 1 1 60001",
              "KEYMOVE 5 " + std::to_string(epoch) + " 2147483648 1 1 10000",
@@ -77,18 +80,23 @@ int main(int argc, char **argv) {
              std::string("KEYMOVE 9 1 1 1 1"), std::string("SNAP 0")}) {
             command(bad); CHECK(simulated::commands.empty() && commandIdle() && stopped());
         }
-        // Existing angle commands still require calibrated north.
-        command("MOVE 1 0 0");
-        CHECK(simulated::commands.empty());
-        CHECK(Serial.output.find("yaw disabled: calibrated north baseline") != std::string::npos);
+        CHECK(Serial.output.find("axis=yaw requested_ms=1000") != std::string::npos);
+        CHECK(Serial.output.find("axis=pitch requested_ms=1000") != std::string::npos);
+        CHECK(Serial.output.find("axis=carriage requested_ms=1000") != std::string::npos);
+        CHECK(Serial.output.find("min_ms=") != std::string::npos);
     } else if (scenario == "admission") {
-        pitchReady = false; keymove(epoch);
-        CHECK(simulated::commands.empty() && commandIdle());
-        advance(1300);
-        CHECK(pitchReady);
-        simulated::bnoPauseStart = millis(); simulated::bnoPauseEnd = millis() + 1000;
-        advance(200); keymove(epoch);
-        CHECK(simulated::commands.empty() && commandIdle());
+        pitchReady = referenceSet = bnoValid = northUsable = false;
+        simulated::bnoPauseStart = millis(); simulated::bnoPauseEnd = millis() + 20000;
+        keymove(epoch); CHECK(keyframeActive); finishMove();
+        CHECK(Serial.output.find("status=PASS") != std::string::npos);
+        CHECK(snapshot(8) == epoch);
+    } else if (scenario == "travel") {
+        command("KEYRETURN 2 " + std::to_string(epoch) + " 4000 -4800 2000");
+        CHECK(keyframeActive && keyframe.travel);
+        CHECK(simulated::commands.size() == 3);
+        CHECK(simulated::commands[1].speed == 2400 && simulated::commands[1].acceleration == 2400);
+        finishMove(); CHECK(pitchMotor->getCurrentPosition() == -4800);
+        CHECK(millis() < 8000 && snapshot(3) == epoch);
     } else if (scenario == "configuration") {
         simulated::accelerationFails = true; keymove(epoch);
         CHECK(simulated::commands.empty() && stopped());
@@ -112,7 +120,7 @@ int main(int argc, char **argv) {
             CHECK(simulated::commands.back().at - begin <= 2);
             for (const auto &move : simulated::commands) CHECK(!move.continuous && move.speed <= 80 && move.acceleration <= 250);
             const auto count = simulated::commands.size();
-            if (scenario == "complete" || scenario == "zero_axis") {
+            if (scenario == "complete" || scenario == "zero_axis" || scenario == "missing_bno") {
                 command("JOG 0 0 0"); CHECK(!manualActive);
                 command("SNAP 3");
                 CHECK(Serial.output.find("SNAP REJECTED id=3") != std::string::npos);
@@ -139,6 +147,7 @@ int main(int argc, char **argv) {
                 command("MOVE 0 0 100");
                 CHECK(poseActive && carriageMotor->getAcceleration() == CARRIAGE_ACCELERATION);
                 finishMove();
+                if (scenario == "missing_bno") { std::puts("PASS KEYMOVE with no BNO hardware"); return 0; }
                 command("MOVE 0 1 100"); advance(50);
                 CHECK(poseActive && carriageMotor->getAcceleration() == CARRIAGE_ACCELERATION);
                 command("STOP"); finishMove();
@@ -159,8 +168,14 @@ int main(int argc, char **argv) {
                     advance(1100);
                     CHECK(injected && handledAt && handledAt - injectAt <= 20);
                     CHECK(bnoTrace.acquireMaxUs >= 1000000);
-                } else if (scenario == "unexpected_stop") yawMotor->forceStop();
+                } else if (scenario == "stall_continue") { simulated::blockBnoMs = 1000; advance(1100); }
+                else if (scenario == "unexpected_stop") yawMotor->forceStop();
                 else { CHECK(false); }
+                if (scenario == "stale" || scenario == "reset" || scenario == "pitch_guard" || scenario == "stall_continue") {
+                    finishMove(); CHECK(Serial.output.find("KEYMOVE RESULT id=2 status=PASS") != std::string::npos);
+                    CHECK(snapshot(8) == epoch);
+                    std::printf("PASS sensor-independent keyframe: %s\n", scenario.c_str()); return 0;
+                }
                 advance(3500);
                 CHECK(stopped()); noRestart(count);
                 CHECK(Serial.output.find("KEYMOVE RESULT id=2 status=PASS") == std::string::npos);

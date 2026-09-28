@@ -60,7 +60,11 @@ int main(int argc, char **argv) {
         else if (scenario == "blocked_bno") { simulated::blockBnoMs = 500; advance(10); }
         else if (scenario == "invalid_feedback") { simulated::invalidQuaternion = true; advance(300); }
         else if (scenario == "wrong_report") { simulated::wrongReportType = true; advance(300); }
-        else if (scenario == "accuracy") { simulated::accuracy = 1; advance(30); }
+        else if (scenario == "accuracy") {
+            simulated::accuracy = 0; advance(30000);
+            CHECK(commandIdle() && Serial.output.find("FINAL RESULT: PASS") != std::string::npos);
+            std::printf("PASS imperfect-quality POSE\n"); return 0;
+        }
         else if (scenario == "reset") { simulated::resetDuringPoll = true; advance(30); }
         else if (scenario == "runaway") { simulated::yawDisturbance = -2; advance(30); }
         else if (scenario == "pitch_guard") { simulated::pitchDisturbance = 70; advance(30); }

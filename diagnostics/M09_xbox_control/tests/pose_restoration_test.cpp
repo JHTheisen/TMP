@@ -82,7 +82,7 @@ int main(int argc, char **argv) {
     simulated::physicalPitchUsesRoll = false;
     simulated::rawBnoRoll = -13;
     simulated::baselineYaw = 20; simulated::baselinePitch = 8;
-    if (scenario == "pitch_low") simulated::accuracy = 0;
+    if (scenario == "pitch_low" || scenario == "unqualified") simulated::accuracy = 0;
     setup(); advance(2200);
     CHECK(commandIdle() && pitchReady && simulated::commands.empty());
     CHECK(yawPulsesPerDegree == 0 && pitchPulsesPerDegree == 0);
@@ -90,7 +90,7 @@ int main(int argc, char **argv) {
     CHECK(fabs(orientation.roll - simulated::rawBnoRoll) < 0.001);
 
     if (scenario == "first_pose" || scenario == "first_carriage" || scenario == "pitch_low") {
-        line(scenario == "pitch_low" ? "POSE 20 9 0" :
+        line(scenario == "pitch_low" ? "MOVE 0 1 0" :
             (scenario == "first_carriage" ? "POSE 21 9 100" : "POSE 21 9 0"));
         CHECK(poseActive);
         finishPose(); checkPrecisionCommands();
@@ -100,6 +100,13 @@ int main(int argc, char **argv) {
         CHECK(pitchPulsesPerDegree > 0);
         if (scenario != "pitch_low") CHECK(yawPulsesPerDegree > 0);
         else CHECK(yawPulsesPerDegree == 0 && !yawMotor->isRunning());
+    } else if (scenario == "unqualified") {
+        pitchReady = referenceSet = northUsable = false;
+        beginPose(1, 1, 0, true);
+        CHECK(poseActive && yawRequired && !accuracyRequired);
+        finishPose(); checkPrecisionCommands();
+        CHECK(fabs(shortestDifference(21, orientation.heading)) <= TOLERANCE_DEG);
+        CHECK(fabs(physicalPitch() - 9) <= TOLERANCE_DEG);
     } else if (scenario == "fallback_bounds") {
         reject(23.1, 8); reject(20, 11.1); reject(16.9, 8); reject(20, 4.9);
         line("MOVE 3 3 0"); CHECK(poseActive);
@@ -107,12 +114,9 @@ int main(int argc, char **argv) {
         CHECK(fabs(shortestDifference(23, orientation.heading)) <= TOLERANCE_DEG);
         CHECK(fabs(physicalPitch() - 11) <= TOLERANCE_DEG);
     } else if (scenario == "admission") {
-        pitchReady = false; reject(21, 9); pitchReady = true;
         bnoValid = false; reject(21, 9); bnoValid = true;
         reportEnabled = false; reject(21, 9); reportEnabled = true;
         bnoWatchdogReady = false; reject(21, 9); bnoWatchdogReady = true;
-        referenceSet = false; reject(21, 9); referenceSet = true;
-        bnoAccuracy = 1; reject(21, 9); bnoAccuracy = 3;
         reject(20, 75); reject(20, -75); reject(186, 8);
         const uint32_t savedReceipt = lastBnoGood;
         lastBnoGood = millis() - BNO_STALE_MS; reject(21, 9); lastBnoGood = savedReceipt;
@@ -130,15 +134,10 @@ int main(int argc, char **argv) {
         CHECK(referenceSet && bnoAccuracy == 1);
         const double requestedYaw = heading.continuous + shortestDifference(19.8, orientation.heading);
         line("POSE 19.8 9 0");
-        CHECK(poseActive && !yawRequired && fabs(yawAxis.target - requestedYaw) < 0.001);
+        CHECK(poseActive && yawRequired && fabs(yawAxis.target - requestedYaw) < 0.001);
         simulated::accuracy = 3; simulated::yawDisturbance = 0.5;
-        advance(300);
-        CHECK(commandIdle() && !poseActive && manualMotorsStopped());
-        CHECK(Serial.output.find("Yaw target outside tolerance after magnetic feedback recovered") != std::string::npos);
-        CHECK(Serial.output.find("OPERATION FAILED:") != std::string::npos);
-        CHECK(Serial.output.find("FINAL RESULT: PASS") == std::string::npos);
-        for (const auto &command : simulated::commands)
-            CHECK(command.stepPin != tmp_hardware::YAW_STEP_PIN);
+        finishPose(); checkPrecisionCommands();
+        CHECK(fabs(shortestDifference(19.8, orientation.heading)) <= TOLERANCE_DEG);
     } else if (scenario == "velocity_receipt") {
         heldPose(); const uint32_t base = millis();
         simulated::now = base + 20; sample(base + 10, 20, 8); serviceAxes();

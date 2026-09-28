@@ -1,6 +1,7 @@
 // Included inside main.cpp's private namespace. This independent finite-step
 // operation never calls the POSE angle controller or sensor objects.
 struct KeyframeOperation {
+    bool travel = false;
     bool stopping = false, failed = false, latched = false, invalidated = false;
     uint32_t id = 0, started = 0, durationMs = 0, stopStarted = 0, lastDisplay = 0;
     uint32_t endedAt[3] = {};
@@ -16,11 +17,11 @@ FastAccelStepper *keyframeMotor(unsigned axis) {
 }
 int32_t keyframeAcceleration(unsigned axis) {
     return axis == 0 ? YAW_SLEW_ACCELERATION :
-        (axis == 1 ? PITCH_SLEW_ACCELERATION : CARRIAGE_ACCELERATION);
+        (axis == 1 ? PITCH_TRAVEL_ACCELERATION : CARRIAGE_ACCELERATION);
 }
 uint32_t keyframeSpeed(unsigned axis) {
     return axis == 0 ? YAW_SLEW_SPEED_HZ :
-        (axis == 1 ? PITCH_SLEW_SPEED_HZ : CARRIAGE_MAX_SPEED_HZ);
+        (axis == 1 ? PITCH_TRAVEL_SPEED_HZ : CARRIAGE_MAX_SPEED_HZ);
 }
 void invalidateKeyframes(const char *reason) {
     if (++keyframeEpoch == 0) ++keyframeEpoch;
@@ -47,8 +48,8 @@ void snapshotKeyframe(uint32_t id) {
         "heading=%.3f physical_pitch=%.3f bno_valid=%s bno_age_ms=%lu accuracy=%u north_usable=%s unhomed=YES\n",
         static_cast<unsigned long>(id), static_cast<unsigned long>(keyframeEpoch),
         static_cast<long>(yawMotor->getCurrentPosition()), static_cast<long>(pitchMotor->getCurrentPosition()),
-        static_cast<long>(carriageMotor->getCurrentPosition()), orientation.heading, physicalPitch(),
-        fresh(now) ? "YES" : "NO", static_cast<unsigned long>(now - lastBnoGood), bnoAccuracy,
+        static_cast<long>(carriageMotor->getCurrentPosition()), lastPlausibleOrientation.heading, physicalPitch(lastPlausibleOrientation),
+        fresh(now) ? "YES" : "NO", static_cast<unsigned long>(hasPlausibleOrientation ? now - lastPlausibleAt : UINT32_MAX), lastPlausibleAccuracy,
         fresh(now) && northUsable ? "YES" : "NO");
     queueText(line);
 }
@@ -87,14 +88,7 @@ void stopKeyframe(const char *reason, bool failure, bool latch) {
 void keyframeSafety() {
     if (!keyframeActive || keyframe.stopping) return;
     const uint32_t now = millis();
-    motionWatchdog.check(now);
-    if (motionWatchdog.tripped() || !fresh(now))
-        stopKeyframe("BNO feedback stale or unavailable", true, false);
-    else if (fabs(physicalPitch()) >= MAX_USABLE_PITCH_DEG)
-        stopKeyframe("measured pitch reached +/-75 degree guard", true, false);
-    else if (fabs(heading.continuous - (referenceSet ? northTargetContinuous : pitchReadyYaw)) >= RELATIVE_LIMIT_DEG)
-        stopKeyframe("measured yaw travel guard exceeded", true, false);
-    else if (now - keyframe.started > keyframe.durationMs + std::max<uint32_t>(2000, keyframe.durationMs / 5))
+    if (now - keyframe.started > keyframe.durationMs + std::max<uint32_t>(2000, keyframe.durationMs / 5))
         stopKeyframe("requested duration deadline exceeded", true, false);
 }
 
@@ -110,7 +104,7 @@ void serviceKeyframe() {
         else if (keyframe.axes[axis].moving && !keyframe.ended[axis]) {
             keyframe.ended[axis] = true; keyframe.endedAt[axis] = now - keyframe.started;
             unexpectedStop |= keyframeMotor(axis)->getCurrentPosition() != keyframe.axes[axis].target;
-            earlyArrival |= now - keyframe.started + std::max<uint32_t>(500, keyframe.durationMs / 10) < keyframe.durationMs;
+            earlyArrival |= !keyframe.travel && now - keyframe.started + std::max<uint32_t>(500, keyframe.durationMs / 10) < keyframe.durationMs;
         }
     }
     keyframe.concurrentAxes = std::max(keyframe.concurrentAxes, running);
@@ -131,11 +125,11 @@ void serviceKeyframe() {
         if (!keyframe.stopping && !targets) {
             stopKeyframe("motor stopped short of generated-step target", true, false); return;
         }
-        if (!keyframe.stopping && now - keyframe.started > keyframe.durationMs + std::max<uint32_t>(500, keyframe.durationMs / 10)) {
+        if (!keyframe.stopping && !keyframe.travel && now - keyframe.started > keyframe.durationMs + std::max<uint32_t>(500, keyframe.durationMs / 10)) {
             stopKeyframe("actual elapsed time exceeded requested duration tolerance", true, false); return;
         }
         motionWatchdog.disarm();
-        if (!motionWatchdog.clearTripWhenStopped()) return;
+        if (motionWatchdog.configured() && !motionWatchdog.clearTripWhenStopped()) return;
         keyframeActive = false; finalPrinted = true;
         phase = keyframe.latched ? Phase::ABORTED : Phase::COMPLETE;
         char line[650];
@@ -163,25 +157,42 @@ void serviceKeyframe() {
     }
 }
 
-void beginKeyframe(uint32_t id, uint32_t epoch, const int32_t targets[3], uint32_t durationMs) {
+void beginKeyframe(uint32_t id, uint32_t epoch, const int32_t targets[3], uint32_t durationMs, bool travel = false) {
     checkSensorReset();
     if (!commandIdle() || !controlReady || !poseMotorsStopped()) {
         rejectKeyframe("KEYMOVE", id, "READY and all motors stopped required"); return;
     }
     if (epoch != keyframeEpoch) { rejectKeyframe("KEYMOVE", id, "capture epoch invalid; recapture A and B"); return; }
-    if (!pitchReady || !fresh(millis()) || !bnoWatchdogReady || !motionWatchdog.clearTripWhenStopped()) {
-        rejectKeyframe("KEYMOVE", id, "fresh BNO orientation and intact pitch baseline required"); return;
-    }
-    if (fabs(physicalPitch()) >= MAX_USABLE_PITCH_DEG ||
-        fabs(heading.continuous - (referenceSet ? northTargetContinuous : pitchReadyYaw)) >= RELATIVE_LIMIT_DEG) {
-        rejectKeyframe("KEYMOVE", id, "current orientation outside existing travel guards"); return;
+    // Drain previous orientation watchdog callbacks, never arm them for step motion.
+    motionWatchdog.disarm();
+    if (motionWatchdog.configured() && !motionWatchdog.clearTripWhenStopped()) {
+        rejectKeyframe("KEYMOVE", id, "previous motor stop still pending"); return;
     }
     m09::keyframes::AxisPlan plans[3];
+    double travelSeconds = 0;
     for (unsigned axis = 0; axis < 3; ++axis) {
-        if (!m09::keyframes::planAxis(keyframeMotor(axis)->getCurrentPosition(), targets[axis], durationMs,
+        const int32_t current = keyframeMotor(axis)->getCurrentPosition();
+        const double distance = fabs(static_cast<double>(targets[axis]) - current);
+        if (travel && static_cast<int64_t>(targets[axis]) - current >= INT32_MIN &&
+            static_cast<int64_t>(targets[axis]) - current <= INT32_MAX) {
+            auto &plan = plans[axis]; plan.target = targets[axis]; plan.moving = distance != 0;
+            plan.speedMilliHz = keyframeSpeed(axis) * 1000; plan.acceleration = keyframeAcceleration(axis);
+            plan.predictedSeconds = m09::keyframes::minimumSeconds(distance, keyframeSpeed(axis), keyframeAcceleration(axis));
+            travelSeconds = fmax(travelSeconds, plan.predictedSeconds);
+        } else if (!m09::keyframes::planAxis(current, targets[axis], durationMs,
                 keyframeSpeed(axis), keyframeAcceleration(axis), plans[axis])) {
-            rejectKeyframe("KEYMOVE", id, "duration/displacement infeasible for finite speed, acceleration or step resolution"); return;
+            char reason[260];
+            snprintf(reason, sizeof(reason), "axis=%s requested_ms=%lu displacement=%.0f cap_hz=%lu accel=%ld min_ms=%.0f detail=%s",
+                axis == 0 ? "yaw" : axis == 1 ? "pitch" : "carriage", static_cast<unsigned long>(durationMs),
+                static_cast<double>(targets[axis]) - current, static_cast<unsigned long>(keyframeSpeed(axis)),
+                static_cast<long>(keyframeAcceleration(axis)), ceil(1000 * m09::keyframes::minimumSeconds(distance, keyframeSpeed(axis), keyframeAcceleration(axis))),
+                m09::keyframes::failureReason(current, targets[axis], durationMs, keyframeSpeed(axis), keyframeAcceleration(axis)));
+            rejectKeyframe("KEYMOVE", id, reason); return;
         }
+    }
+    if (travel) {
+        if (travelSeconds > 60) { rejectKeyframe("KEYMOVE", id, "return travel exceeds 60 second bound"); return; }
+        durationMs = static_cast<uint32_t>(ceil(travelSeconds * 1000));
     }
     // Validate all three profiles before configuring any motor, then configure
     // every participant before the first nonblocking start.
@@ -193,8 +204,7 @@ void beginKeyframe(uint32_t id, uint32_t epoch, const int32_t targets[3], uint32
             rejectKeyframe("KEYMOVE", id, "motor configuration rejected before start"); return;
         }
     }
-    if (!motionWatchdog.arm(lastBnoGood)) { rejectKeyframe("KEYMOVE", id, "BNO watchdog could not arm"); return; }
-    keyframe = {}; keyframe.id = id; keyframe.durationMs = durationMs;
+    keyframe = {}; keyframe.travel = travel; keyframe.id = id; keyframe.durationMs = durationMs;
     for (unsigned axis = 0; axis < 3; ++axis) keyframe.axes[axis] = plans[axis];
     keyframe.started = millis(); keyframeActive = true;
     finalPrinted = false; phase = Phase::MOVING; window.active = false;
@@ -221,7 +231,8 @@ bool parseKeyframeInteger(const char *token, int64_t minimum, int64_t maximum, i
 }
 bool executeKeyframeCommand(char **tokens, unsigned count) {
     const bool snapshot = strcmp(tokens[0], "SNAP") == 0;
-    if (!snapshot && strcmp(tokens[0], "KEYMOVE") != 0) return false;
+    const bool travel = strcmp(tokens[0], "KEYRETURN") == 0;
+    if (!snapshot && !travel && strcmp(tokens[0], "KEYMOVE") != 0) return false;
     int64_t id = 0;
     if (count < 2 || !parseKeyframeInteger(tokens[1], 1, UINT32_MAX, id)) {
         rejectKeyframe(tokens[0], 0, "positive uint32 request id required"); return true;
@@ -232,13 +243,13 @@ bool executeKeyframeCommand(char **tokens, unsigned count) {
         return true;
     }
     int64_t epoch = 0, duration = 0, positions[3] = {};
-    bool valid = count == 7;
+    bool valid = count == (travel ? 6U : 7U);
     if (valid) valid = parseKeyframeInteger(tokens[2], 1, UINT32_MAX, epoch) &&
-        parseKeyframeInteger(tokens[6], m09::keyframes::MIN_DURATION_MS, m09::keyframes::MAX_DURATION_MS, duration);
+        (travel || parseKeyframeInteger(tokens[6], m09::keyframes::MIN_DURATION_MS, m09::keyframes::MAX_DURATION_MS, duration));
     for (unsigned axis = 0; valid && axis < 3; ++axis)
         valid = parseKeyframeInteger(tokens[3 + axis], INT32_MIN, INT32_MAX, positions[axis]);
     if (!valid) { rejectKeyframe("KEYMOVE", id, "use KEYMOVE id epoch yaw_steps pitch_steps carriage_steps duration_ms (1000..60000)"); return true; }
     const int32_t targets[3] = {static_cast<int32_t>(positions[0]), static_cast<int32_t>(positions[1]), static_cast<int32_t>(positions[2])};
-    beginKeyframe(static_cast<uint32_t>(id), static_cast<uint32_t>(epoch), targets, static_cast<uint32_t>(duration));
+    beginKeyframe(static_cast<uint32_t>(id), static_cast<uint32_t>(epoch), targets, static_cast<uint32_t>(duration), travel);
     return true;
 }

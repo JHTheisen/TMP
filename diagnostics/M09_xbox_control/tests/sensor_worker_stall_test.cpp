@@ -72,7 +72,7 @@ int main(int argc, char **argv) {
         else {
             assert(!lostManual && manualActive);
             assert(yawMotor->isRunning() && pitchMotor->isRunning() && carriageMotor->isRunning());
-            assert(manualYaw.rate==YAW_SLEW_SPEED_HZ*4/10 && manualPitch.rate==PITCH_SLEW_SPEED_HZ/2);
+            assert(manualYaw.rate==YAW_SLEW_SPEED_HZ*4/10 && manualPitch.rate==PITCH_TRAVEL_SPEED_HZ/2);
             assert(manualCarriage.rate==CARRIAGE_MAX_SPEED_HZ*6/10);
         }
         printf("PASS sensor-stall %s: command handled in %lu ms during >=1000 ms I/O stall; no lease trip\n",

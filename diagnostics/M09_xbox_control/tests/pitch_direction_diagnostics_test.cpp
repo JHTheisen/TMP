@@ -37,7 +37,7 @@ int main() {
     stream(250,500);
     assert(recordHas("event=RUN cmd=250 step_dir=-1 call=runBackward rc=0", "dir26_out=1"));
     assert(recordHas("event=DIR_CHECK", "dir26_out=1"));
-    assert(pitchMotor->getCurrentSpeedInMilliHz()<0 && manualPitch.rate==300);
+    assert(pitchMotor->getCurrentSpeedInMilliHz()<0 && manualPitch.rate==PITCH_TRAVEL_SPEED_HZ/4);
     const auto before=count(Serial.output,"PITCH_DIR ");
     stream(300,1000); // Held sign and changing magnitude emit no packet chatter.
     assert(count(Serial.output,"PITCH_DIR ")==before);

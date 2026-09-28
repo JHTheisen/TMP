@@ -33,5 +33,18 @@ int main() {
     sample.epoch=epoch; sample.receivedMs=millis()-5;
     assert(sensorWorker.samples.push(sample)); serviceBno();
     assert(bnoValid && lastBnoGood==sample.receivedMs && bnoDiagnostics.rotationAt==sample.receivedMs);
+    // An old but plausible newer receipt is retained for display, never made
+    // fresh for closed-loop control. Poor quality is metadata, not no data.
+    hasPlausibleOrientation = false;
+    sample.receivedMs = millis() - 200; sample.event.status = 0;
+    assert(sensorWorker.samples.push(sample)); serviceBno();
+    assert(hasPlausibleOrientation && lastPlausibleAt == sample.receivedMs && lastPlausibleAccuracy == 0);
+    const auto retainedAt = lastPlausibleAt;
+    sample.receivedMs = millis(); sample.event.un.rotationVector.real = NAN;
+    assert(sensorWorker.samples.push(sample)); serviceBno();
+    assert(hasPlausibleOrientation && lastPlausibleAt == retainedAt);
+    sample.event.un.rotationVector = {0,0,0,0,0};
+    assert(sensorWorker.samples.push(sample)); serviceBno();
+    assert(lastPlausibleAt == retainedAt);
     puts("PASS sensor results: old samples stay stale, reset survives queue overflow, no foreground I/O or manual disarm");
 }

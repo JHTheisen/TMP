@@ -80,7 +80,7 @@ class HostUiTests(unittest.TestCase):
             result = []
             if clock.now > 0.6 and "arm" not in sent:
                 sent.add("arm")
-                result.append(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_SPACE))
+                # Centered startup now enables manual without an arm button.
             if clock.now > 0.9 and "fault" not in sent:
                 sent.add("fault")
                 if scenario == "disconnect":

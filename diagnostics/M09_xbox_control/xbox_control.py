@@ -116,9 +116,9 @@ class ManualSession:
                 self.raw_waiting = False
                 self.readiness_note = "Raw commands enabled; joystick JOG disabled. F2 exits without arming."
             elif self.auto_mode:
-                self.readiness_note = "AUTO selected; joystick JOG disabled. A/Space stops; Y exits disarmed."
+                self.readiness_note = "Automatic action active; sticks cancel and take over. A/Space stops."
             else:
-                self.readiness_note = "Center sticks for 0.5 s, then press Space/A to arm."
+                self.readiness_note = "Center sticks for 0.5 s to enable manual control."
         elif line == "M09 BUSY":
             self.ready = False
             if self.state in ("active", "arming"):
@@ -237,7 +237,7 @@ def arguments(argv=None):
     parser.add_argument("--no-invert-pitch", action="store_true", help="default maps stick up (negative raw) to positive physical pitch")
     parser.add_argument("--deadband", type=float, default=0.15)
     parser.add_argument("--speed-scale", type=float, default=1.0, help="fraction of existing ceilings, default 1.0; valid (0,1]")
-    for name, default in (("auto", 3), ("capture-a", 4), ("capture-b", 5), ("duration", 2),
+    for name, default in (("capture-a", 4), ("capture-b", 5), ("duration", 2),
                           ("play", 10), ("return-a", 8), ("increment", 9)):
         parser.add_argument("--" + name + "-button", type=int, default=default,
                             help="pygame button index; confirm button/hat events with --dry-run")
@@ -249,7 +249,7 @@ def arguments(argv=None):
         parser.error("--speed-scale must be in (0,1]")
     if min(args.controller, args.yaw_axis, args.pitch_axis, args.carriage_axis) < 0 or len({args.yaw_axis, args.pitch_axis, args.carriage_axis}) != 3:
         parser.error("controller/axis indices must be nonnegative and yaw/pitch/carriage axes must differ")
-    buttons = [getattr(args, name + "_button") for name in ("auto", "capture_a", "capture_b", "duration", "play", "return_a", "increment")]
+    buttons = [getattr(args, name + "_button") for name in ("capture_a", "capture_b", "duration", "play", "return_a", "increment")]
     if min(buttons + [args.move_hat]) < 0 or len(set(buttons)) != len(buttons) or any(value in (0, 1) for value in buttons):
         parser.error("AUTO buttons must be distinct, nonnegative, and must not replace A=0 or B=1")
     return args
@@ -312,7 +312,8 @@ def main(argv=None):
         response_snapshot = []
         held_buttons = set()
         hat_neutral = True
-        input_notice = "Y: AUTO mode. Use --dry-run to verify new button/hat mappings."
+        input_notice = "MANUAL + KEYFRAMES: LB/RB capture; Home plays. Y is unassigned."
+        takeover = False
         while running:
             now = time.monotonic()
             events = pygame.event.get()  # Pumps input before every read, as in v05.
@@ -324,6 +325,7 @@ def main(argv=None):
                     log.event("INPUT", "window focus lost")
                     focused = False
                     centered_since = None
+                    takeover = False
                     if session.state in ("active", "arming") or session.raw_mode or auto.enabled:
                         session.disarm("Window lost focus; return, center sticks and rearm.", request_stop=True)
                         auto.cancel(now, "Window lost focus; STOP requested, wait for READY.")
@@ -332,6 +334,7 @@ def main(argv=None):
                 elif event.type == pygame.WINDOWFOCUSGAINED:
                     log.event("INPUT", "window focus gained")
                     focused = True
+            was_automatic = auto.overridable
             if port is not None:
                 received = port.read(min(port.in_waiting, 4096))
                 if any(value > 127 for value in received):
@@ -355,6 +358,7 @@ def main(argv=None):
                     discard_rx_line = True
                     log.event("PARSER", "overlong telemetry line discarded (>8192 bytes); command stream continues")
                     lines = (lines + ["Malformed telemetry line discarded; command stream continues."])[-8:]
+            session.auto_mode = auto.busy
             # Read current axes after receiving status; never replay pre-pause input.
             raw = [joystick.get_axis(i) for i in range(joystick.get_numaxes())]
             yaw = stick_command(raw[args.yaw_axis], args.deadband, args.speed_scale, args.invert_yaw)
@@ -403,13 +407,12 @@ def main(argv=None):
             if any(event.type == pygame.QUIT or pressed(event, pygame.K_ESCAPE) for event in events):
                 break
             toggling_raw = any(pressed(event, pygame.K_F2) for event in events)
-            toggling_auto = not session.raw_mode and any(index in fresh_buttons and selected_button(event, args.auto_button)
-                                                         for index, event in enumerate(events))
-            safety_stop = any(pressed(event, pygame.K_F12) or
-                              ((session.raw_mode or toggling_raw or auto.enabled or toggling_auto) and
-                               (pressed(event, pygame.K_SPACE) or selected_button(event, 0))) for event in events)
-            suppress_submit = safety_stop or toggling_raw or toggling_auto or any(event.type == pygame.WINDOWFOCUSLOST for event in events)
+            safety_stop = any(pressed(event, pygame.K_F12) or pressed(event, pygame.K_SPACE) or
+                              selected_button(event, 0) for event in events)
+            suppress_submit = safety_stop or toggling_raw or any(event.type == pygame.WINDOWFOCUSLOST for event in events)
             if safety_stop:
+                takeover = False
+                centered_since = None
                 stop = session.stop_raw(now)
                 auto.cancel(now)
                 log.event("INPUT", "operator STOP; raw command submission suppressed for this input batch")
@@ -424,8 +427,9 @@ def main(argv=None):
                     log.event("DISPLAY", "frozen; controls and telemetry remain live" if display_frozen else "live; showing latest state")
                     continue
                 if key == pygame.K_F2 and focused and not getattr(event, "repeat", False):
+                    takeover = False
                     auto.leave(now)
-                    session.auto_mode = False
+                    session.auto_mode = True
                     stop = session.leave_raw(now) if session.raw_mode else session.enter_raw(now)
                     centered_since = None
                     last_jog = None
@@ -466,22 +470,6 @@ def main(argv=None):
                         # unicode or joystick buttons. Keep input a single line.
                         session.raw_text += "".join(character for character in event.text if character.isprintable())
                     continue
-                if (index in fresh_buttons and selected_button(event, args.auto_button)
-                        and focused and not toggling_raw):
-                    if auto.enabled:
-                        auto.leave(now)
-                    else:
-                        auto.enter(now)
-                    session.auto_mode = auto.enabled
-                    stop = session.stop_raw(now)
-                    centered_since = None
-                    last_jog = None
-                    log.event("AUTO_MODE", "entered; STOP and disarm" if auto.enabled else "left; STOP and deliberate rearm required")
-                    if not args.dry_run:
-                        send(stop)
-                    else:
-                        auto.receive("M09 READY", now)
-                    continue
                 if auto.enabled:
                     if not focused or suppress_submit:
                         continue
@@ -498,6 +486,11 @@ def main(argv=None):
                     if action:
                         data = auto.request(action, now, centered_since is not None and now - centered_since >= 0.5)
                         if data is not None:
+                            session.stop_raw(now)
+                            session.auto_mode = True
+                            last_jog = None
+                            centered_since = None
+                            takeover = False
                             log.event("AUTO_TX", repr(data))
                             if args.dry_run:
                                 print(f"AUTO DRY RUN: {data!r}")
@@ -508,18 +501,24 @@ def main(argv=None):
                         else:
                             log.event("AUTO_NOT_SENT", auto.note)
                     continue
-                if (key == pygame.K_SPACE or selected_button(event, 0)) and not toggling_raw and not toggling_auto and not safety_stop:
-                    if args.dry_run:
-                        continue
-                    stop = session.stop(now)
-                    if stop:
-                        send(stop)
-                    elif not session.arm(now, focused and centered_since is not None and now - centered_since >= 0.5):
-                        reason = "Arm refused: wait for M09 READY and center both sticks for 0.5 s."
-                        log.event("ARM_REFUSED", f"{reason} state={session.state} ready={session.ready} focused={focused} centered_since={centered_since}")
-                        lines = (lines + [reason])[-8:]
-                    else:
-                        last_jog = None
+            # A deliberate stick displacement cancels the entire sequence before
+            # any prepared follow-up can be sent. Wait for STOP/READY and the zero
+            # JOG acknowledgment, then use only the current live stick value.
+            if focused and not session.raw_mode and not suppress_submit and not centered and (auto.overridable or (was_automatic and auto.phase == "READY")):
+                stop = session.stop_raw(now)
+                if not args.dry_run:
+                    send(stop)
+                auto.cancel(now, "Joystick takeover: braking, then manual JOG.")
+                takeover = True
+                last_jog = None
+            session.auto_mode = auto.busy
+            if focused and not session.raw_mode and not auto.busy and not suppress_submit and now >= next_send:
+                centered_ready = centered_since is not None and now - centered_since >= .5
+                if session.arm(now, takeover or centered_ready):
+                    last_jog = None
+                    takeover = False
+            if session.pending_stop:
+                takeover = False
             if now >= next_send:
                 if not args.dry_run:
                     frame = session.frame(now, yaw, pitch, carriage)
@@ -550,9 +549,9 @@ def main(argv=None):
                 f"Yaw: {yaw:+5d}   Pitch: {pitch:+5d}   Carriage: {carriage:+5d}   Centered: {centered}   Ready: {session.ready}",
                 "Raw axes: " + "  ".join(f"{i}:{v:+.2f}" for i, v in enumerate(raw)),
                 input_notice,
-                "Space / A: arm centered or stop & disarm. Keyboard X / B: latched abort. Esc / close: stop & exit.",
+                "A / Space / F12: STOP. Keyboard X / B: latched abort. Esc / close: stop & exit.",
                 "F2: raw command line / leave & STOP. F12: STOP. In raw mode Space / A always STOP; Tab inserts spaces.",
-                "Keep focus. Manual command loss stops JOG; POSE needs STOP. Telemetry delay only warns.",
+                "Center sticks to enable manual. Stick movement cancels automatic actions. Keep window focused.",
                 f"Log: {log.path.name if log.path else 'UNAVAILABLE'} (full path printed at startup)" + (f" ERROR: {log.error}" if log.error else ""),
                 "",
             ]
@@ -561,10 +560,8 @@ def main(argv=None):
                 display += [f"RAW MODE — JOG DISABLED | {raw_status}",
                             "Tab: space; Backspace: erase; Enter: send; F2: leave disarmed.",
                             "> " + session.raw_text[-max(1, text_columns - 4):] + "_"]
-            elif auto.enabled:
-                display += auto.display_lines()
             else:
-                display += ["MANUAL JOG | Y: AUTO | Existing centered A/Space arming required"]
+                display += auto.display_lines()
             # Cache only presentation text. Protocol state, RX/logging, joystick
             # processing and the raw-command editor above always remain live.
             if not display_frozen or diagnostic_snapshot is None:

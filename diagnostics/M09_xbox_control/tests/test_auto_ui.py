@@ -51,6 +51,7 @@ class AutoUiTests(unittest.TestCase):
             rx = b""
             mode = "READY"
             positions = (100, -200, 300)
+            axes = [0.0] * 6
             completion = None
             closed = False
             @property
@@ -72,9 +73,9 @@ class AutoUiTests(unittest.TestCase):
                     self.rx += (f"KEYFRAME_SNAPSHOT id={words[1]} epoch=42 yaw_steps={self.positions[0]} "
                                 f"pitch_steps={self.positions[1]} carriage_steps={self.positions[2]} "
                                 "heading=290 physical_pitch=-40 bno_valid=YES bno_age_ms=10 accuracy=1 north_usable=NO unhomed=YES\n").encode()
-                elif words[0] == "KEYMOVE":
+                elif words[0] in ("KEYMOVE", "KEYRETURN"):
                     self.mode = "BUSY"
-                    self.rx += f"KEYMOVE ACCEPTED id={words[1]} epoch=42 duration_ms={words[6]}\nM09 BUSY\n".encode()
+                    self.rx += f"KEYMOVE ACCEPTED id={words[1]} epoch=42 duration_ms={words[6] if len(words) == 7 else 200}\nM09 BUSY\n".encode()
                     self.completion = (clock.now + .2, words[1], tuple(int(value) for value in words[3:6]))
                 elif words[0] == "MOVE":
                     self.mode = "BUSY"
@@ -92,8 +93,8 @@ class AutoUiTests(unittest.TestCase):
         joystick.get_numaxes.return_value = 6
         joystick.get_instance_id.return_value = 42
         joystick.get_name.return_value = "Simulated Xbox AUTO"
-        joystick.get_axis.return_value = 0.0
-        schedule = [(0.1, tap(3))] + list(actions)
+        joystick.get_axis.side_effect = lambda index: port.axes[index]
+        schedule = list(actions)
         schedule.sort(key=lambda item: item[0])
         sent = set()
 
@@ -151,102 +152,108 @@ class AutoUiTests(unittest.TestCase):
             self.assertTrue(port.closed)
         return result, writes, session, auto, frames, log
 
-    def test_capture_return_play_single_connection_and_no_jog(self):
+    def test_capture_manual_reposition_and_play_from_arbitrary_position(self):
         result, writes, session, auto, _, log = self.run_ui([
             (.8, tap(4)), (1.0, lambda port: setattr(port, "positions", (112, -191, 318))),
-            (1.05, tap(5)), (1.2, tap(8)), (1.3, tap(10)), (1.6, tap(10))])
+            (1.1, tap(5)), (1.8, tap(10))], until=3.5)
         self.assertEqual(result, 0)
-        commands = [data for _, data in writes if data.startswith(b"KEYMOVE")]
-        self.assertEqual(commands, [b"KEYMOVE 4 42 100 -200 300 10000\n", b"KEYMOVE 6 42 112 -191 318 10000\n"])
-        self.assertFalse(any(data.startswith(b"JOG") for _, data in writes))
+        commands = [data for _, data in writes if data.startswith((b"KEYMOVE", b"KEYRETURN"))]
+        self.assertEqual(commands, [b"KEYRETURN 4 42 100 -200 300\n", b"KEYMOVE 6 42 112 -191 318 10000\n"])
         self.assertEqual(auto.frames["A"].steps, (100, -200, 300))
         self.assertEqual(auto.frames["B"].steps, (112, -191, 318))
-        self.assertTrue(session.auto_mode)
-        self.assertIn("AUTO_NOT_SENT", log)
-        self.assertIn("AUTO_TX b'KEYMOVE 6 42 112 -191 318 10000\\n'", log)
+        self.assertTrue(any(data.startswith(b"JOG") for _, data in writes))
+        self.assertFalse(any(1.8 <= at <= 2.4 and data.startswith(b"JOG") for at, data in writes))
+        self.assertIn("KEYMOVE RESULT", log)
 
-    def test_held_and_busy_buttons_and_hat_do_not_repeat_or_queue(self):
-        _, writes, _, auto, _, _ = self.run_ui([
-            (.8, [button(4)]), (.9, [button(4)]), (1.0, [button(4)]),
-            (1.1, [hat((0, 1))]), (1.15, [hat((0, 1))]),
-            (1.2, [hat((0, 0)), hat((0, -1))]), (1.5, [hat((0, -1))]),
-            (1.6, [hat((0, 0)), hat((0, -1))])])
-        self.assertEqual([data for _, data in writes if data.startswith(b"SNAP")], [b"SNAP 1\n"])
-        self.assertEqual([data for _, data in writes if data.startswith(b"MOVE")], [b"MOVE 0 1 0\n", b"MOVE 0 -1 0\n"])
-        self.assertEqual(auto.phase, "READY")
+    def test_manual_movement_between_captures_preserves_a_and_b(self):
+        def move(port):
+            port.axes[1] = -.8
+            port.positions = (100, -230, 300)  # Generated-position fixture response.
+        def center(port):
+            port.axes[1] = 0
+        result, writes, _, auto, _, _ = self.run_ui([
+            (.8, tap(4)), (1.4, move), (1.6, center), (1.7, tap(5))])
+        self.assertEqual(result, 0)
+        self.assertTrue(any(1.4 < at < 1.6 and data.startswith(b"JOG 0 585 0") for at, data in writes))
+        self.assertEqual(auto.frames["A"].steps, (100, -200, 300))
+        self.assertEqual(auto.frames["B"].steps, (100, -230, 300))
+
+    def test_stick_override_return_and_play_resumes_manual_without_centering(self):
+        for offset in (True, False):
+            with self.subTest(returning=offset):
+                actions = [(.8, tap(4))]
+                if offset:
+                    actions.append((1.0, lambda port: setattr(port, "positions", (112, -191, 318))))
+                actions += [(1.1, tap(5)), (1.8, tap(10)),
+                            (1.9, lambda port: port.axes.__setitem__(1, -.8))]
+                result, writes, session, auto, _, _ = self.run_ui(actions, until=2.4)
+                self.assertEqual(result, 0)
+                self.assertTrue(any(at >= 1.9 and data == b"STOP\n" for at, data in writes))
+                self.assertTrue(any(1.9 < at < 2.1 and data.startswith(b"JOG 0 585 0") for at, data in writes))
+                self.assertEqual(len(auto.frames), 2)
+                self.assertEqual(len([data for _, data in writes if data.startswith((b"KEYMOVE", b"KEYRETURN"))]), 1)
+
+    def test_capture_while_stick_deflected_stops_before_snapshot(self):
+        result, writes, _, auto, _, _ = self.run_ui([
+            (.7, lambda port: port.axes.__setitem__(1, -.8)), (.8, tap(4))])
+        self.assertEqual(result, 0)
+        self.assertIn("A", auto.frames)
+        before = [data for at, data in writes if .79 < at < 1]
+        self.assertEqual(before[:2], [b"STOP\n", b"SNAP 1\n"])
+        self.assertFalse(any(data.startswith(b"JOG") for at, data in writes if at >= .8))
+
+    def test_deadband_noise_does_not_override_play(self):
+        result, writes, _, auto, _, _ = self.run_ui([
+            (.8, tap(4)), (1.1, tap(5)), (1.8, tap(10)),
+            (1.9, lambda port: port.axes.__setitem__(1, .14))])
+        self.assertEqual(result, 0)
+        self.assertFalse(any(1.9 <= at < 2.2 and data == b"STOP\n" for at, data in writes))
+        self.assertIn("A", auto.frames)
 
     def test_stop_and_abort_win_over_play_in_same_batch(self):
         for safety in (key(pygame.K_SPACE), button(0), key(pygame.K_F12), key(pygame.K_F2),
                        button(1), key(pygame.K_x), pygame.event.Event(pygame.WINDOWFOCUSLOST)):
             with self.subTest(safety=safety):
-                _, writes, _, auto, _, _ = self.run_ui([
-                    (.8, tap(4)), (1.0, tap(5)), (1.2, tap(10) + [safety])])
-                self.assertFalse(any(data.startswith(b"KEYMOVE") for _, data in writes))
+                _, writes, _, _, _, _ = self.run_ui([
+                    (.8, tap(4)), (1.1, tap(5)), (1.8, tap(10) + [safety])])
+                self.assertFalse(any(data.startswith((b"KEYMOVE", b"KEYRETURN")) for _, data in writes))
                 self.assertEqual(len([data for _, data in writes if data.startswith(b"SNAP")]), 2)
-                self.assertTrue(any(at >= 1.2 and data.strip() in (b"STOP", b"X") for at, data in writes))
+                self.assertTrue(any(at >= 1.8 and data.strip() in (b"STOP", b"X") for at, data in writes))
 
-    def test_auto_toggle_does_not_arm_and_raw_mode_disables_auto_buttons(self):
+    def test_raw_mode_disables_keyframe_buttons(self):
         _, writes, session, auto, _, _ = self.run_ui([
             (.8, tap(4)), (1.0, [key(pygame.K_F2)]),
-            (1.1, tap(3) + tap(5) + tap(2) + tap(10) + [hat((0, 1))]), (1.4, [key(pygame.K_F2)])])
-        self.assertFalse(auto.enabled)
-        self.assertFalse(session.auto_mode)
-        self.assertFalse(session.raw_mode)
-        self.assertEqual(session.state, "idle")
+            (1.1, tap(3) + tap(5) + tap(2) + tap(10) + [hat((0, 1))])])
+        self.assertTrue(session.raw_mode)
+        self.assertEqual(auto.duration, 10)
         self.assertEqual(len([data for _, data in writes if data.startswith(b"SNAP")]), 1)
-        self.assertFalse(any(data.startswith((b"JOG", b"MOVE")) for _, data in writes))
+        self.assertFalse(any(at >= 1 and data.startswith((b"JOG", b"MOVE", b"KEYMOVE")) for at, data in writes))
 
-    def test_f3_keeps_auto_status_and_capture_live(self):
+    def test_f3_keeps_action_status_and_capture_live(self):
         _, _, _, auto, frames, log = self.run_ui([
-            (.7, [key(pygame.K_F3)]), (.8, tap(4)), (1.0, tap(5)), (1.2, tap(10))])
-        frozen = ["\n".join(rows) for stamp, rows in frames if stamp > 1.25]
+            (.7, [key(pygame.K_F3)]), (.8, tap(4)), (1.1, tap(5)), (1.8, tap(10))])
+        frozen = ["\n".join(rows) for stamp, rows in frames if stamp > 1.85]
         self.assertTrue(any("DISPLAY FROZEN" in rows and "KEYMOVE_ACTIVE" in rows for rows in frozen))
         self.assertTrue(any("A=(100, -200, 300)" in rows for rows in frozen))
-        self.assertEqual(auto.phase, "READY")
         self.assertIn("KEYMOVE RESULT", log)
 
     def test_timeout_stops_and_does_not_retry(self):
         _, writes, _, auto, _, _ = self.run_ui([(.8, tap(4))], until=5.5, snapshots=False)
         self.assertEqual([data for _, data in writes if data.startswith(b"SNAP")], [b"SNAP 1\n"])
         self.assertTrue(any(4.7 < at < 5.2 and data == b"STOP\n" for at, data in writes))
-        self.assertEqual(auto.phase, "FAULT")
+        self.assertFalse(auto.frames)
 
-    def test_controller_x_duration_requires_release_and_is_not_abort(self):
+    def test_release_required_duration_home_capture_and_hat(self):
         result, writes, _, auto, frames, _ = self.run_ui([
-            (.7, [button(2)]), (.8, [button(2)]), (.9, [button(2)]),
-            (1.0, [button(2, True)]), (1.1, tap(2))])
+            (.7, [button(2)]), (.75, [button(2)]), (.8, [button(4)]), (.9, [button(4)]),
+            (1.1, tap(5)), (1.8, [button(10)]), (1.9, [button(10)]),
+            (2.2, [button(10)]), (2.5, [hat((0, 1))]), (2.55, [hat((0, 1))])], until=3)
         self.assertEqual(result, 0)
-        self.assertEqual(auto.duration, 5)  # 10 -> 20 -> 5, only two presses.
-        self.assertFalse(any(data.startswith((b"X", b"MOVE", b"KEYMOVE")) for _, data in writes))
-        help_text = "\n".join(frames[-1][1])
-        for label in ("X button (2): duration", "Home (10): Play A->B", "keyboard X: abort"):
-            self.assertIn(label, help_text)
-        self.assertNotIn("View", help_text)
-        self.assertNotIn("Menu", help_text)
-
-    def test_home_play_requires_release_and_busy_presses_are_not_queued(self):
-        result, writes, _, auto, _, _ = self.run_ui([
-            (.8, tap(4)), (1.0, tap(5)), (1.2, [button(10)]),
-            (1.25, [button(10)]), (1.28, [button(10, True)]),
-            (1.3, [button(10)] + tap(2)),  # Fresh presses while busy are discarded.
-            (1.6, [button(10)]), (1.7, [button(10, True)]),
-            (1.8, tap(10))])
-        self.assertEqual(result, 0)
-        self.assertEqual(len([data for _, data in writes if data.startswith(b"KEYMOVE")]), 2)
-        self.assertEqual(len([data for _, data in writes if data.startswith(b"SNAP")]), 4)
-        self.assertEqual(auto.duration, 10)
-        self.assertFalse(any(data.startswith(b"JOG") for _, data in writes))
-
-    def test_unused_buttons_and_manual_x_home_do_not_request_motion(self):
-        result, writes, session, auto, _, _ = self.run_ui([
-            (.8, tap(4)), (1.0, tap(5)), (1.1, tap(6) + tap(7)),
-            (1.2, tap(3)), (1.4, tap(2) + tap(10))])
-        self.assertEqual(result, 0)
-        self.assertFalse(auto.enabled)
-        self.assertEqual(auto.duration, 10)
-        self.assertEqual(session.state, "idle")
-        self.assertEqual(len([data for _, data in writes if data.startswith(b"SNAP")]), 2)
-        self.assertFalse(any(data.startswith((b"KEYMOVE", b"MOVE", b"JOG", b"X")) for _, data in writes))
+        self.assertEqual(auto.duration, 20)
+        self.assertEqual(len([data for _, data in writes if data.startswith(b"KEYMOVE")]), 1)
+        self.assertEqual(len([data for _, data in writes if data.startswith(b"MOVE")]), 1)
+        self.assertEqual(len([data for _, data in writes if data.startswith(b"SNAP")]), 3)
+        self.assertIn("Home (10): Play A->B", "\n".join(frames[-1][1]))
 
     def test_increment_duration_diagonals_and_dry_input_diagnostics(self):
         _, writes, _, auto, _, log = self.run_ui([
@@ -256,7 +263,7 @@ class AutoUiTests(unittest.TestCase):
         self.assertEqual(auto.duration, 20)
         self.assertIn("Controller hat 0: (1, 1)", log)
         _, _, _, _, frames, log = self.run_ui([(.7, [hat((0, 1))])], dry_run=True)
-        self.assertIn("AUTO_TX b'MOVE 0 1 0\\n'", log)
+        self.assertIn("AUTO_TX", log)
         self.assertTrue(any(any("Controller hat 0: (0, 1)" in row for row in rows) for _, rows in frames))
 
 

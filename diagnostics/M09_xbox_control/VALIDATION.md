@@ -1,6 +1,90 @@
 # M09 offline validation — 2026-09-26
 
-## Current host work: physical controller button mapping (2026-09-27)
+## Current work: manual-first keyframes and optional-sensor independence
+
+Restore baseline: `0467dfac3ce33df7dd67f8c9781e746669df3cf0`, tag
+`M10_pre_workflow_redesign`, branch `main`. The complete pre-change working tree
+was committed before editing. No push or post-change milestone tag was made.
+
+Manual is now the default operator workflow. Centered sticks for 0.5 seconds
+trigger the existing zero-JOG/acknowledgment handshake automatically. A/Space/F12
+always STOP; B/keyboard X retains latched abort. Y and the AUTO toggle are removed.
+LB/RB capture, controller X duration, RS increment, LS return and Home Play are
+available directly from manual. Capturing brakes before requesting a fresh stopped
+snapshot. Normal movement and control-state/BNO-quality changes preserve A/B.
+
+Home performs STOP/snapshot, KEYRETURN to A if necessary, then a 200 ms stopped
+observation and another correlated snapshot before timed KEYMOVE to B. The selected
+5/10/20-second duration applies only to A-to-B. KEYRETURN uses native travel caps
+with its own 60-second bound. Generated-step return verification never claims
+measured-angle settling. A failed/stopped return or mismatched A cannot start B.
+
+Stick displacement outside the existing deadband cancels automatic actions and
+pending continuations. STOP/READY and the zero-JOG acknowledgment precede applying
+the current live stick value; no centering or mode toggle is needed for takeover.
+Explicit STOP/focus loss/F2 cancels takeover permission. Normal recovery requires
+centered sticks. There is still one outstanding operation; busy presses do not queue.
+F2 keeps exclusive raw-command ownership, and F3 remains presentation-only.
+
+KEYMOVE/KEYRETURN no longer arm the BNO watchdog or depend on BNO freshness,
+accuracy, pitch qualification, north, reset state or sensor-derived angle guards.
+Motor initialization, stopped admission, epochs, signed count/delta bounds,
+finite profiles, endpoints, deadlines and stop handling remain enforced.
+The sensor-worker source and ownership architecture are unchanged.
+
+Orientation POSE/MOVE still needs fresh plausible samples and its feedback watchdog,
+but no longer requires a learned pitch baseline, accuracy >=2 or qualified north
+just to admit/control a reported-angle target. Absolute POSE always holds yaw;
+MOVE with zero yaw delta explicitly leaves yaw uncontrolled. Sensor quality remains
+visible, not described as calibrated. Freshness, quaternion validation, heading
+continuity, direction/progress, travel-angle limits and post-stop settling remain.
+Historical samples are retained separately for display with age, accuracy,
+availability, freshness and north qualification. Invalid vectors cannot replace
+the retained sample. Old queued data cannot become fresh at consumption time.
+
+Pitch manual/generated-step travel now has separate 2400 steps/s and 2400 steps/s²
+caps (previously 1200/1200); yaw/carriage remain 2000/2000. POSE's 80 Hz bootstrap,
+16-step first bursts, 250 steps/s² precision acceleration, correction/settling
+logic and 1200/1200 angular slew settings are retained. Timed planning can use
+capped acceleration when the preferred ramp would be infeasible, provided the
+duration remains feasible. Rejections identify axis, duration, displacement, cap,
+acceleration, minimum duration and speed/acceleration versus step-resolution cause.
+The earlier id=13 rejection cannot be reconstructed without its displacement;
+the new diagnostics distinguish those possible causes.
+
+Verification: complete `tests/run_host_tests.ps1` passes, including all C++ cases,
+all 111 Python tests and all 23 protected M08 hashes. Added coverage includes
+manual capture/reposition, Play's independent return and playback durations,
+joystick takeover/noise, failed return verification, BNO-independent motion,
+stale/invalid retained samples, imperfect-quality POSE, faster travel and planner
+feasibility. The expanded all-axis rejection case also passes independently.
+Full output: `.pio/workflow_tests.txt`; compile output: `.pio/workflow_build.txt`.
+The final ESP32 compile passes (47,420 bytes RAM, 384,281 bytes flash).
+`git diff --check` passes. Earlier failures from obsolete arm/quality/rate test
+expectations were updated; testing also exposed and fixed a startup handshake
+race by arming on the transmit tick. No failures remain.
+
+Files changed:
+- Host: `xbox_control.py`, `auto_control.py`.
+- Firmware: `src/main.cpp`, `src/manual_control.h`, `src/keyframe_math.h`,
+  `src/keyframe_motion.h`.
+- C++ checks: `tests/keyframe_math_test.cpp`, `tests/keyframe_motion_test.cpp`,
+  `tests/m08_pose_integration_test.cpp`, `tests/manual_integration_test.cpp`,
+  `tests/pitch_direction_diagnostics_test.cpp`, `tests/pose_restoration_test.cpp`,
+  `tests/sensor_result_test.cpp`, `tests/sensor_worker_stall_test.cpp`.
+- Python checks: `tests/test_auto_control.py`, `tests/test_auto_ui.py`,
+  `tests/test_display_freeze_ui.py`, `tests/test_host_ui.py`,
+  `tests/test_raw_command_ui.py`.
+- Runner/docs: `tests/run_host_tests.ps1`, `README.md`, `VALIDATION.md`.
+
+No serial hardware, upload or physical motion was used. Remaining physical limits:
+higher pitch rates need torque/stop verification; counts remain startup-relative
+and unhomed; missed steps/backlash are not measured; low-quality reported heading
+is not qualified north; a broken serial link can prevent delivery of STOP during
+finite motion. README contains the staged physical procedure. New firmware and
+host must be deployed together later for KEYRETURN support.
+
+## Previous host work: physical controller button mapping (2026-09-27)
 
 Replaced only the unavailable AUTO duration/play bindings: controller X (button 2)
 cycles duration and Center/Home (button 10) plays A to B. Y, LB/RB, stick clicks,

@@ -42,6 +42,9 @@ constexpr int32_t FIRST_POSE_BURST_STEPS = 16;
 // Position is generated pulses from power-up, not a homed or measured distance.
 constexpr uint32_t CARRIAGE_MAX_SPEED_HZ = 2000;
 constexpr int32_t CARRIAGE_ACCELERATION = 2000;
+// Generated-step/manual travel is independent of the proven POSE precision caps.
+constexpr uint32_t PITCH_TRAVEL_SPEED_HZ = 2400;
+constexpr int32_t PITCH_TRAVEL_ACCELERATION = 2400;
 enum class Operation { NORTH_LEVEL, POSE, MANUAL };
 
 enum class Phase { STARTUP, BASELINE, MOVING, SETTLING, COMPLETE, ABORTED, MANUAL };
@@ -92,6 +95,10 @@ ManualAxis manualYaw, manualPitch, manualCarriage;
 AccuracyGrace accuracyGrace;
 BnoHealth bnoHealth;
 EulerAngles orientation = {0, 0, 0};
+EulerAngles lastPlausibleOrientation = {0, 0, 0};
+bool hasPlausibleOrientation = false;
+uint32_t lastPlausibleAt = 0;
+uint8_t lastPlausibleAccuracy = 0;
 // The post-relocation powered log shows pitch-only motion in Euler pitch,
 // with roll nearly unchanged. Keep the verified motor signs; select feedback
 // consistently for this mounting, including qualification and travel guards.
@@ -285,9 +292,6 @@ void safety() {
     if (!poseNeedsBno) return;
     const uint32_t now = millis(); bnoMaxGap = std::max(bnoMaxGap, now - lastBnoGood);
     if (motionWatchdog.tripped() || now - lastBnoGood >= BNO_STALE_MS) abortTest("BNO085 feedback stale: acquisition gap reached 150 ms");
-    else if (yawRequired && bnoAccuracy < BNO_MIN_ACCURACY)
-        abortTest("BNO085 accuracy below 2: yaw operation stopped");
-    else if (accuracyRequired && accuracyGrace.expired(now)) abortTest("BNO085 accuracy below 2 continuously for 1000 ms");
     else if (bnoValid && fabs(heading.continuous - (referenceSet ? northTargetContinuous : pitchReadyYaw)) >= RELATIVE_LIMIT_DEG)
         abortTest(referenceSet ? "Measured yaw travel guard exceeded +/-185 degrees from continuous north target" :
             "Measured yaw travel guard exceeded +/-185 degrees from pitch-only startup orientation");
@@ -300,7 +304,6 @@ void invalidateOrientation(const char *reason) {
     heading = {}; window.active = false;
     if (hadData) { queueText("BNO WARNING: "); queueText(reason); queueText("\n"); }
     if (poseActive && poseNeedsBno && !poseStopping) abortTest(reason);
-    if (keyframeActive) stopKeyframe(reason, true, false);
 }
 bool checkSensorReset() {
     const uint32_t epoch = sensorWorker.resetEpoch.load(std::memory_order_acquire);
@@ -344,6 +347,13 @@ void serviceBno() {
     if (!sensorWorker.samples.pop(sample)) return;
     const auto &event = sample.event;
     bnoDiagnostics.observe(event, sample.receivedMs);
+    EulerAngles plausible;
+    if (sample.epoch == sensorWorker.resetEpoch.load(std::memory_order_acquire) &&
+        event.sensorId == SH2_ROTATION_VECTOR && quaternionToEuler(event.un.rotationVector, plausible) &&
+        (!hasPlausibleOrientation || sampleAtOrAfter(sample.receivedMs, lastPlausibleAt))) {
+        lastPlausibleOrientation = plausible; lastPlausibleAt = sample.receivedMs;
+        lastPlausibleAccuracy = event.status; hasPlausibleOrientation = true;
+    }
     if ((finalPrinted && !commandIdle()) || !reportEnabled ||
         sample.epoch != sensorWorker.resetEpoch.load(std::memory_order_acquire) ||
         millis() - sample.receivedMs >= BNO_STALE_MS || event.sensorId != SH2_ROTATION_VECTOR) {
@@ -371,7 +381,7 @@ void serviceBno() {
     bnoDiagnostics.accepted = true; bnoDiagnostics.reason = "accepted";
     acceptedBnoSequence = event.sequence; acceptedBnoTimestamp = event.timestamp;
     bnoValid = true; lastBnoGood = now;
-    if ((poseActive && poseNeedsBno && !poseStopping) || keyframeActive) {
+    if (poseActive && poseNeedsBno && !poseStopping) {
         motionWatchdog.recordFresh(now);
     }
     if (accuracyRequired && referenceSet && !finalPrinted) {
@@ -464,7 +474,7 @@ void updateVelocity(Axis &axis, uint32_t now) {
 void commandAxis(Axis &axis) {
     safety();
     if (finalPrinted || poseStopping || !fresh(millis()) || motionWatchdog.tripped() || axis.motor->isRunning()) return;
-    if (!axis.pitch && (!yawRequired || !referenceSet || bnoAccuracy < BNO_MIN_ACCURACY)) return;
+    if (!axis.pitch && !yawRequired) return;
     if (!posePrecisionOnly && axis.confirmed && !axis.slewFinished &&
         fabs(axis.error) > axis.brakeAtDeg + SLEW_ENTRY_HYSTERESIS_DEG) {
         axis.slewDirection = stepDirection(axis.error, axis.pitch);
@@ -543,7 +553,7 @@ void serviceAxes() {
         }
         return;
     }
-    if ((!pitchReady && !referenceSet) || !fresh(millis())) return;
+    if (!fresh(millis())) return;
     const uint32_t now = millis();
     if (carriagePending || yawMotor->isRunning() || pitchMotor->isRunning() || carriageMotor->isRunning()) {
         poseStoppedObserved = false; settleSamples = 0;
@@ -558,12 +568,7 @@ void serviceAxes() {
     if (!sampleAtOrAfter(sampleAt, controlStartedAt)) return;
     yawAxis.current = heading.continuous; yawAxis.error = yawAxis.target - yawAxis.current;
     pitchAxis.current = physicalPitch(); pitchAxis.error = pitchAxis.target - pitchAxis.current;
-    // A pitch-only admission must not silently claim a missed yaw target if
-    // an already-qualified magnetic reference regains accuracy during the move.
-    // Stop for a new explicit command rather than enabling unplanned yaw motion.
-    if (!yawRequired && referenceSet && bnoAccuracy >= BNO_MIN_ACCURACY && fabs(yawAxis.error) > TOLERANCE_DEG) {
-        abortTest("Yaw target outside tolerance after magnetic feedback recovered"); return;
-    }
+    // Absolute POSE always checks yaw; MOVE 0 dp ds explicitly leaves yaw uncontrolled.
     if ((yawRequired && !axisProgress(yawAxis, yawAxis.error)) || !axisProgress(pitchAxis, pitchAxis.error)) return;
     if (yawRequired) serviceAxis(yawAxis, now, sampleAt);
     if (finalPrinted) return;
@@ -635,8 +640,8 @@ void beginPose(double yawValue, double pitchValue, int64_t carriageValue, bool r
         controlStartedAt = millis(); window.active = false;
         queueText("POSE ACCEPTED: relative carriage steps; angular axes stationary\n"); return;
     }
-    if (!pitchReady || !fresh(millis()) || !bnoWatchdogReady || !motionWatchdog.clearTripWhenStopped()) {
-        rejectPose("fresh valid BNO orientation and intact pitch baseline required"); return;
+    if (!fresh(millis()) || !bnoWatchdogReady || !motionWatchdog.clearTripWhenStopped()) {
+        rejectPose("fresh plausible BNO orientation and feedback watchdog required"); return;
     }
     if (relative && (yawValue < -180.0 || yawValue >= 180.0)) {
         rejectPose("MOVE yaw delta must be in [-180,180) degrees; no implicit full-turn motion"); return;
@@ -653,14 +658,13 @@ void beginPose(double yawValue, double pitchValue, int64_t carriageValue, bool r
     const double yawError = targetYaw - heading.continuous, pitchError = requestedPitch - physicalPitch();
     const bool moveYaw = fabs(yawError) > TOLERANCE_DEG, movePitch = fabs(pitchError) > TOLERANCE_DEG;
     const double carriageDistance = fabs(static_cast<double>(requestedCarriage) - carriageMotor->getCurrentPosition());
-    const bool pitchOnly = !referenceSet || bnoAccuracy < BNO_MIN_ACCURACY;
-    if (pitchOnly && moveYaw) {
-        rejectPose("yaw disabled: calibrated north baseline and BNO accuracy >=2 required"); return;
-    }
+    const bool pitchOnly = relative && yawValue == 0;
+    if (!referenceSet && !pitchReady) pitchReadyYaw = heading.continuous;
+    if (!northUsable) queueText("POSE NOTE: using live reported orientation; magnetic north not qualified\n");
     if (!moveYaw && !movePitch && carriageDistance == 0) {
         queueText("POSE ALREADY AT TARGET: no motion; carriage units=STEPS from startup zero\n"); return;
     }
-    // A qualified yaw target remains required even when initially satisfied.
+    // An absolute yaw target remains required even when initially satisfied.
     // Missing timing on that holding axis must not permit an unplanned slew.
     const bool missingTiming = pitchPulsesPerDegree <= 0 || (!pitchOnly && yawPulsesPerDegree <= 0);
     if (missingTiming && (fabs(pitchError) > FIRST_POSE_MAX_ERROR_DEG ||
@@ -676,7 +680,7 @@ void beginPose(double yawValue, double pitchValue, int64_t carriageValue, bool r
         // learn timing only after a stopped, successfully measured completion.
         resetPoseAxis(yawAxis, targetYaw, yawTimingPeak);
         resetPoseAxis(pitchAxis, requestedPitch, pitchTimingPeak);
-        yawRequired = accuracyRequired = !pitchOnly;
+        yawRequired = !pitchOnly; accuracyRequired = false;
         posePrecisionOnly = missingTiming; poseStoppedObserved = false;
         poseNeedsBno = true;
         carriageTarget = static_cast<int32_t>(requestedCarriage); carriagePending = carriageDistance > 0;
@@ -691,7 +695,7 @@ void beginPose(double yawValue, double pitchValue, int64_t carriageValue, bool r
         recordTimingStarts();
         if (!motionWatchdog.arm(lastBnoGood)) { abortTest("BNO watchdog could not arm for precision motion"); return; }
         queueText(pitchOnly ? "PITCH-ONLY ACCEPTED: yaw stationary; carriage uses requested steps\n" :
-            "POSE ACCEPTED: first precision move; calibrated yaw target remains required\n");
+            "POSE ACCEPTED: first precision move; reported yaw target remains required\n");
         if (missingTiming) queueText("POSE PRECISION: caps_hz=80/80/80 max_burst_steps=16; no slew; timing learned only on success\n");
         safety(); return;
     }
@@ -724,7 +728,7 @@ void beginPose(double yawValue, double pitchValue, int64_t carriageValue, bool r
         if (fabs(actualSeconds - duration) > timingTolerance) timingLimited = true;
     }
     resetPoseAxis(yawAxis, targetYaw, yawTimingPeak); resetPoseAxis(pitchAxis, requestedPitch, pitchTimingPeak);
-    yawRequired = accuracyRequired = true;
+    yawRequired = true; accuracyRequired = false;
     posePrecisionOnly = false; poseStoppedObserved = false;
     poseNeedsBno = true;
     carriageTarget = static_cast<int32_t>(requestedCarriage); carriagePending = carriageDistance > 0;
@@ -817,8 +821,8 @@ void sensorTelemetry() {
     char line[850];
     snprintf(line, sizeof(line), "BNO_STATE available=%s fresh=%s age_ms=%lu accuracy=%u north_usable=%s heading=%.3f physical_pitch=%.3f pitch_axis=PITCH pitch_roll=%.3f has_sample=%s accepted_seq=%u accepted_sensor_us=%llu accepted_rx_ms=%lu\n",
         bnoInitialized && reportEnabled ? "YES" : "NO", fresh(now) ? "YES" : "NO",
-        static_cast<unsigned long>(now - lastBnoGood), bnoAccuracy, northUsable && fresh(now) ? "YES" : "NO",
-        orientation.heading, physicalPitch(), orientation.roll, bnoHealth.freshSamples ? "YES" : "NO", acceptedBnoSequence,
+        static_cast<unsigned long>(hasPlausibleOrientation ? now - lastPlausibleAt : UINT32_MAX), lastPlausibleAccuracy, northUsable && fresh(now) ? "YES" : "NO",
+        lastPlausibleOrientation.heading, physicalPitch(lastPlausibleOrientation), lastPlausibleOrientation.roll, hasPlausibleOrientation ? "YES" : "NO", acceptedBnoSequence,
         static_cast<unsigned long long>(acceptedBnoTimestamp), static_cast<unsigned long>(lastBnoGood));
     queueText(line);
     const auto &raw = bnoDiagnostics;

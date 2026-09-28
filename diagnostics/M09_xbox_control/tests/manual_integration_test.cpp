@@ -76,14 +76,14 @@ int main(int argc, char **argv) {
             stream(250, 300, 500);
             CHECK(simulated::actualYaw() > yaw && simulated::actualPitch() > pitch);
             CHECK(carriageMotor->getCurrentPosition() == 0 && !carriageMotor->isRunning());
-            CHECK(manualYaw.rate == YAW_SLEW_SPEED_HZ / 4 && manualPitch.rate == PITCH_SLEW_SPEED_HZ * 3 / 10);
+            CHECK(manualYaw.rate == YAW_SLEW_SPEED_HZ / 4 && manualPitch.rate == PITCH_TRAVEL_SPEED_HZ * 3 / 10);
             const size_t commands = simulated::commands.size();
             stream(500, 500, 200); CHECK(simulated::commands.size() == commands);
             if (scenario == "rates") {
                 stream(1000, 1000, 200);
-                CHECK(manualYaw.rate == YAW_SLEW_SPEED_HZ && manualPitch.rate == PITCH_SLEW_SPEED_HZ);
+                CHECK(manualYaw.rate == YAW_SLEW_SPEED_HZ && manualPitch.rate == PITCH_TRAVEL_SPEED_HZ);
                 CHECK(simulated::motors[0].acceleration == YAW_SLEW_ACCELERATION);
-                CHECK(simulated::motors[1].acceleration == PITCH_SLEW_ACCELERATION);
+                CHECK(simulated::motors[1].acceleration == PITCH_TRAVEL_ACCELERATION);
             }
             if (scenario == "reverse") {
                 stream(-250, -250, 1300);

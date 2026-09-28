@@ -144,10 +144,10 @@ void serviceManualAxis(Axis &axis, ManualAxis &manual, uint32_t now) {
     const char *name = axis.pitch ? "PITCH" : "YAW";
     if (serviceManualBraking(axis.motor, manual, requestedDirection, name, now) || !requestedDirection) return;
     const uint32_t rate = std::max<uint32_t>(1, static_cast<uint32_t>(
-        lround(fabs(static_cast<double>(manual.request)) * slewSpeed(axis.pitch) / 1000.0)));
+        lround(fabs(static_cast<double>(manual.request)) * (axis.pitch ? PITCH_TRAVEL_SPEED_HZ : YAW_SLEW_SPEED_HZ) / 1000.0)));
     if (!manual.direction || rate != manual.rate) {
         safety(); if (finalPrinted) return;
-        if (axis.motor->setAcceleration(slewAcceleration(axis.pitch)) != 0 || axis.motor->setSpeedInHz(rate) != 0) {
+        if (axis.motor->setAcceleration(axis.pitch ? PITCH_TRAVEL_ACCELERATION : YAW_SLEW_ACCELERATION) != 0 || axis.motor->setSpeedInHz(rate) != 0) {
             failManualAxis(axis.motor, manual, name, "FastAccelStepper configuration rejected"); return;
         }
         if (!manual.direction) {

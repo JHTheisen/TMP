@@ -9,7 +9,7 @@ velocity independent of orientation/reference availability. M08 is unchanged.
 | Axis | DIR / STEP GPIO | Maximum pulses/s | Acceleration pulses/s² |
 | --- | --- | ---: | ---: |
 | Yaw | 32 / 33 | 2000 | 2000 |
-| Pitch | 26 / 12 | 1200 | 1200 |
+| Pitch | 26 / 12 | 2400 | 2400 |
 | Carriage | 21 / 22 | 2000 | 2000 |
 
 Physical pitch feedback for automatic positioning is now **BNO Euler PITCH**,
@@ -75,14 +75,14 @@ can affect both sensors without making raw manual velocity depend on them.
 - Left stick horizontal = carriage (raw axis 0). Use `--invert-carriage` to reverse it.
 - The existing 15% deadband and quadratic velocity curve are unchanged.
 - The user's current default scale is **1.0**: full stick requests yaw 2000,
-  pitch 1200 and carriage 2000 pulses/s. `--speed-scale 0.25` selects one quarter
+  pitch 2400 and carriage 2000 pulses/s. `--speed-scale 0.25` selects one quarter
   of those rates. This diagnostics pass preserves the increased settings.
-- Center both sticks for 0.5 s and press Space/A to arm. No motion is sent before
+- Center both sticks for 0.5 s to enable manual control automatically. No motion is sent before
   the firmware acknowledges the zero-JOG handshake. Telemetry age alone does not
   block that handshake.
 - Release an individual stick axis to brake that motor. Reversal retains motor
   acceleration and the existing 100 ms stopped observation.
-- Space/A during motion sends STOP and disarms after braking. keyboard X/controller B deliberately
+- A/Space/F12 sends STOP; center sticks again for 0.5 s before manual resumes. keyboard X/controller B deliberately
   sends the existing latched abort; resetting is required after explicit abort.
 
 | Command | Behavior |
@@ -116,45 +116,63 @@ Focus/input loss, host exceptions and failed session transitions use ordinary ST
 only deliberate keyboard X/controller B sends X. A host command gap reaching the same 250 ms lease
 requires rearming before sending nonzero input again.
 
-## Xbox AUTO and two-keyframe playback
+## Manual positioning and two-keyframe actions
 
-The analog manual mappings/arming, F2 raw editor and F3 display freeze are retained.
-**Y** enters AUTO, sends STOP and leaves manual control disarmed. Wait for READY
-and center both sticks for 0.5 seconds. AUTO never streams joystick JOG commands.
-Y exits with STOP; manual operation then requires deliberate centered A/Space
-arming. F2 enters raw mode with STOP; AUTO movement buttons are inactive there.
+Manual is the default workflow. Center both sticks for 0.5 seconds; the host
+performs the existing zero-JOG/acknowledgment handshake automatically. There is
+no AUTO toggle and Y is unassigned. The stick mapping, deadband, quadratic curve,
+watchdog, F2 raw editor and F3 display freeze remain in use.
 
-| Control in AUTO | Action |
+| Control | Action |
 | --- | --- |
+| Left stick vertical / horizontal | Manual pitch / carriage |
+| Right stick horizontal | Manual yaw |
 | D-pad up/down | `MOVE 0 +/-increment 0` (physical pitch degrees) |
-| D-pad right/left | `MOVE +/-increment 0 0` (yaw degrees; existing north checks apply) |
-| Right-stick click | Select 1 or 2 degree increments; default 1 on entry |
-| LB / RB | Capture A / B from a fresh stopped firmware snapshot |
-| Controller X (button 2) | Cycle duration 5 / 10 / 20 seconds; initial 10 |
-| Left-stick click | Position to A using captured generated-step coordinates |
-| Center/Home (button 10) | Play A to B; a fresh snapshot must confirm the platform is at A |
-| A / Space / F12 | STOP all participating axes; no automatic resume |
-| B / keyboard X | Existing latched abort and exit |
+| D-pad right/left | `MOVE +/-increment 0 0` (reported BNO heading degrees) |
+| Right-stick click (9) | Select 1 or 2 degree increments; initial 1 |
+| LB (4) / RB (5) | Stop, then capture A / B from a fresh firmware snapshot |
+| Controller X (2) | Cycle duration 10 -> 20 -> 5 seconds; initial 10 |
+| Left-stick click (8) | Travel to A at normal generated-step travel speed |
+| Center/Home (10) | Return to A if necessary, then run the full timed A to B |
+| A (0) / Space / F12 | STOP; center sticks again before normal manual resumes |
+| B (1) / keyboard X | Latched abort and exit; firmware reset required |
+| Esc / close | STOP and exit |
 
-One press produces at most one request; buttons must be released and the D-pad
-must return to neutral before another request. Busy presses and diagonals are
-discarded, never queued or replayed. The live AUTO panel shows pending/active
-state, A/B step targets, duration, last result and rejections even under F3.
-Capture and playback use new snapshot replies, not the frozen display. A return
-or play press performs a stopped snapshot check followed by one movement command;
-STOP cancels this continuation before transmission if it has not yet started.
+Capture works even while manually moving: it brakes first and captures the stopped
+position, not the position at the instant of the button press. Ordinary manual
+movement, BNO quality changes, F2 and STOP preserve A/B. Firmware restart, a changed
+coordinate epoch, forced/uncertain motor stop, or loss of communication/coordinate
+confidence clears captures. They remain in memory only; no persistence is added.
 
-Default pygame mappings: A=0, B=1, X=2, Y=3, LB=4, RB=5, left-stick click=8,
-right-stick click=9, Center/Home=10, D-pad hat=0. Verify these with `--dry-run` before powered use:
-button/hat events appear in the window and log. Use `--auto-button`,
-`--capture-a-button`, `--capture-b-button`, `--duration-button`, `--play-button`,
-`--return-a-button`, `--increment-button` and `--move-hat` if needed. A=0 and B=1
-remain reserved. Dry-run opens no serial and cannot capture real keyframes.
+Center sticks before requesting automatic movement. One press initiates one
+sequence; release buttons/neutralize the hat for another. Busy movement presses
+and hat diagonals are discarded. No JOG is sent during an automatic sequence.
+Deliberate stick displacement outside the existing deadband cancels the sequence,
+sends STOP, waits for stopped READY and the zero-JOG acknowledgment, then applies
+the current live stick value without requiring centering or a mode change.
+This is braking plus protocol latency, not an abrupt motor-direction reversal.
+Noise within deadband does not cancel motion. Explicit STOP, focus loss and F2
+cancel pending continuations and clear this takeover permission.
 
-Only A and B are held in application memory. Ordinary stopped manual
-repositioning and gentle STOP preserve them. Firmware restart, changed coordinate
-epoch, forced/uncertain stop, or host request/link timeout invalidates captures.
-Lost acknowledgments cause STOP and deliberate recovery, never automatic retry.
+Play first obtains a fresh stopped snapshot. If away from A it uses `KEYRETURN`,
+which has its own travel time independent of the selected playback duration.
+After successful return and READY it waits 200 ms, obtains another stopped
+snapshot and verifies A exactly before sending the timed `KEYMOVE` to B. This is
+motor-count verification, not measured-angle settling. Failed/stopped returns,
+invalid epochs, missing acknowledgments and STOP cancel the remaining sequence.
+If already at A, the initial stopped snapshot is sufficient to start A to B.
+
+The live MANUAL + KEYFRAMES panel shows action phase, duration, increments and
+captures even with F3 frozen. F2 retains exclusive raw-command entry; keyframe
+buttons and joystick takeover are inactive in the editor. Exiting F2 sends STOP
+and requires centered sticks for 0.5 seconds before normal manual operation.
+After a communication fault, STOP provides deliberate recovery; actions do not retry.
+
+Default buttons: A=0, B=1, X=2, LB=4, RB=5, LS click=8, RS click=9, Home=10;
+D-pad is hat 0. `--capture-a-button`, `--capture-b-button`, `--duration-button`,
+`--play-button`, `--return-a-button`, `--increment-button` and `--move-hat` remain
+configurable. `--auto-button` was removed along with the mode toggle. Dry-run
+opens no serial and cannot capture real keyframes.
 
 ### Finite step-position protocol
 
@@ -162,6 +180,7 @@ These operations are separate from the existing sensor-based POSE controller:
 
 ```text
 SNAP request_id
+KEYRETURN request_id epoch yaw_steps pitch_steps carriage_steps
 KEYMOVE request_id epoch yaw_steps pitch_steps carriage_steps duration_ms
 ```
 
@@ -173,17 +192,24 @@ The host checks this epoch before return/play; firmware checks it again at admis
 
 `KEYMOVE` uses absolute generated-step targets in that startup-relative epoch.
 **All three coordinates are unhomed motor counts**, including yaw and pitch.
-It needs fresh BNO orientation, an intact pitch baseline and the existing BNO
-watchdog/travel guards, but does not need calibrated magnetic north. BNO is used
-for protection, not keyframe endpoint correction. Normal yaw-angle POSE/MOVE
-retains its qualified-north and accuracy >=2 requirements.
+Neither snapshots, KEYRETURN nor KEYMOVE require BNO availability, freshness,
+accuracy, north qualification, pitch baseline or sensor-derived travel limits.
+Sensor stalls/errors/resets remain diagnostic information during generated-step
+motion. The sensor worker remains isolated; no foreground sensor I/O was added.
+Manual and generated-step travel are operator-supervised and unhomed.
+
+Pitch manual/step travel uses 2400 steps/s and 2400 steps/s?, twice its previous
+1200/1200 limits. Yaw and carriage remain at 2000/2000. POSE precision/bootstrap
+and angular slew limits are unchanged. KEYRETURN uses these native travel caps
+and rejects travel over 60 seconds; short axes may finish before long ones.
 
 Every axis is planned before any start, targeting the requested duration with
 approximately 20% acceleration / 60% cruise / 20% deceleration. Integer
-acceleration can shorten small-axis ramps; speed is recalculated to retain the
+acceleration can shorten small-axis ramps; a capped-acceleration profile is used
+when the preferred ramp would exceed the cap. Speed is recalculated to retain the
 shared duration. All nonzero axes start in one foreground pass using nonblocking
 FastAccelStepper finite moves. Starts are near-simultaneous, not pulse-locked.
-Existing axis speed/acceleration ceilings remain the bounds. Infeasible durations,
+The separate travel speed/acceleration ceilings remain the bounds. Infeasible durations,
 integer overflow and overly sparse steps are rejected before movement. Firmware
 accepts 1000..60000 ms; Xbox offers only 5/10/20 seconds. The selected duration is
 not a speed limit, and manual `--speed-scale` does not govern autonomous movement.
@@ -192,7 +218,11 @@ Sparse moves reject if their cruise step interval would exceed the larger of
 250 ms or 5% of duration. Thus extremely small captured displacements may need
 a shorter duration; the UI never automatically enlarges a move or changes time.
 Runtime endpoint timing must be within the larger of 500 ms or 10% of duration.
-An axis stopping short or arriving substantially early stops the whole operation.
+An axis stopping short or arriving substantially early stops the whole timed operation.
+Rejections identify the limiting axis, requested duration, displacement, speed cap,
+acceleration, theoretical minimum duration, and whether timing or step resolution
+is the problem. The minimum is a physical lower bound, not a guarantee for every
+rounded profile. Sparse moves may need a shorter duration, not a longer one.
 
 `KEYMOVE RESULT` reports PASS/STOPPED/FAILED, final counts, requested/elapsed time,
 per-axis endpoint times and maximum concurrent axes. PASS means generated-step
@@ -201,18 +231,25 @@ settling claim. Backlash, missed motor steps or externally moving the platform
 can change actual framing without changing generated counts; recapture if that
 occurs. No homing, absolute carriage measurement or learned gearbox ratio is added.
 
-STOP uses the existing native braking acceleration on each moving axis and the
-three-second forced-stop fallback. BNO stale/reset, motor failures and travel
-guards cancel playback. The sensor worker remains the sole sensor owner. Host
-focus loss/disconnection handling continues to request STOP; a broken serial link
-cannot guarantee delivery, and the manual JOG lease is not a KEYMOVE host lease.
+STOP uses native travel braking acceleration and the three-second forced-stop
+fallback. Motor/API faults, wrong endpoints and deadline failures stop playback;
+BNO quality does not. Host focus loss/disconnection requests STOP. A broken serial
+link cannot guarantee delivery; the 250 ms manual JOG lease is not a KEYMOVE lease.
 
-For the first demonstration: manually position, STOP/READY, Y and LB to capture A;
-Y back to manual, arm and make small visible changes on all three axes; STOP/READY,
-Y and RB to capture B. Select duration, left-stick click to return to A, wait for
-PASS/READY, then Center/Home to play. First verify STOP during a return move. Reissue
-return-to-A deliberately after cancellation. Deployment/physical validation is
-still required; this implementation has not been flashed by the agent.
+First supervised validation after a separately authorized upload:
+1. Run host `--dry-run` to check buttons and the new default workflow.
+2. Start powered testing at reduced manual `--speed-scale`, verify axes/signs,
+   A/Space/F12 STOP and latched abort/reset with ample physical clearance.
+3. Position and press LB; make small visible manual changes, then press RB.
+4. Select a feasible duration, move away from A, center sticks and press Home.
+   Verify return to A completes before the full timed A to B starts.
+5. Test joystick takeover separately during return and playback; verify no queued
+   second leg resumes. Test STOP and F2 cancellation too.
+6. Repeat with small three-axis displacements and inspect generated counts/results.
+   Independently validate pitch at higher travel rates; offline checks cannot
+   establish torque margin or detect missed physical steps.
+
+No upload or physical motion was performed during this implementation.
 
 ## Freeze diagnostic display
 
@@ -251,8 +288,8 @@ queued in the same input batch. Command text is accepted only in the explicit
 focused editor; Xbox buttons are never text.
 
 Press **F2 again** to leave the editor; this also sends STOP and leaves manual
-control disarmed. Wait for READY, center sticks for 0.5 seconds, then deliberately
-press Space/A to use the existing manual arming handshake. Manual traffic never
+control disarmed. Wait for READY and center sticks for 0.5 seconds; the host then
+performs the existing manual arming handshake. Manual traffic never
 resumes automatically after POSE.
 
 The persistent diagnostics show heading, `physical_pitch` (with its declared
@@ -281,7 +318,10 @@ the board has the restored POSE firmware, including ordinary STOP support.
 
 The angular controller uses BNO heading and **Euler PITCH**, with existing motor
 signs, target domain, braking and precision correction. It still
-requires fresh valid orientation; absolute yaw also requires qualified north.
+requires fresh plausible orientation and a working feedback watchdog. Low accuracy,
+missing qualification and an unlearned pitch baseline alone no longer reject yaw
+or pitch movement. Heading means the sensor's reported heading, not verified true
+north; `north_usable` continues to report magnetic qualification separately.
 Loss of essential feedback cancels that operation and returns manual availability.
 Encoder acquisition does not replace this feedback or invent a gearbox calibration.
 
@@ -290,10 +330,12 @@ corrections: angular changes within +/-3 degrees, at most 80 pulses/s and 16
 steps per angular burst, with acceleration 250 pulses/s² and no continuous slew.
 Carriage is capped at 80 pulses/s for that operation. Successful stopped motion
 learns timing for later planning; there is no automatic calibration movement.
-Pitch-only operation remains available without qualified north, while yaw
-movement requires the existing qualified reference and accuracy >=2.
+`MOVE 0 dp ds` explicitly leaves yaw uncontrolled. Absolute POSE always holds its
+yaw target, even at low accuracy. Stale/absent feedback, invalid quaternions,
+ambiguous heading transitions, direction/progress/angle guards and deadlines still
+stop sensor-based control. Historical orientation alone cannot close a live loop.
 
-Qualified yaw remains a target throughout the operation even if its initial
+Absolute yaw remains a target throughout the operation even if its initial
 error was already within tolerance. Feedback velocity, ordering and settling
 use worker receipt timestamps. Post-stop corrections/settling require samples
 received at least 100 ms after stopped motor state was observed. STOP cancellation
@@ -310,8 +352,15 @@ carriage unchanged. Finite moves retain duration and signed-32-bit checks.
 explicit physical pitch, with legacy-firmware fallback.
 
 See [restoration changes, offline evidence and proposed physical test](audit/POSE_RESTORATION_2026-09-27.md).
-This restoration has not been flashed or physically validated, and no new
-milestone has been created.
+The restored pitch-only POSE was physically validated before this workflow change.
+The new workflow/travel-rate changes require separate physical validation.
+
+Last plausible BNO orientation is retained separately from control eligibility.
+`BNO_STATE has_sample=YES` can coexist with `fresh=NO`, `available=NO`, accuracy 0
+or `north_usable=NO`; heading/pitch remain visible with sample age. Old handoff
+samples never become fresh through foreground consumption. Invalid/nonfinite
+quaternions do not replace the retained sample; a full firmware reset starts with
+no historical sample. No-data numeric placeholders are marked `has_sample=NO`.
 
 ## Persistent diagnostics and BNO audit
 
@@ -389,7 +438,7 @@ After **you** flash this build, perform this short pitch-only test:
 1. Provide clearance for a brief move either way. Start the usual Xbox client
    with `--port COM9 --speed-scale 0.25` (temporary test override; default remains
    1.0). Keep right stick and left-stick horizontal centered throughout.
-2. Center both sticks for at least 0.5 s, press Space/A, and confirm manual arming.
+2. Center both sticks for at least 0.5 s and confirm the automatic manual handshake.
 3. Push left stick straight up for 0.5 s, then center for 1 s. Note the physical
    direction. Expected command +250, `runBackward`, later `dir26_out=0`.
 4. Push it straight down for 0.5 s, then center for 1 s. Note the physical

@@ -68,7 +68,7 @@ class DisplayFreezeUiTests(unittest.TestCase):
         joystick.get_instance_id.return_value = 42
         joystick.get_name.return_value = "Simulated Xbox freeze test"
         joystick.get_axis.side_effect = lambda index: (0.7 if clock.now < 1.0 else -0.7) if index == 2 and clock.now > 0.72 else 0.0
-        schedule = [(0.6, [key(pygame.K_F2 if raw else pygame.K_SPACE)]),
+        schedule = [(0.6, [key(pygame.K_F2)] if raw else []),
                     (0.8, [key(pygame.K_F3)]),
                     (0.85, [key(pygame.K_F3, repeat=True)]),
                     (1.3, [key(pygame.K_F3)])] + list(actions)
@@ -172,7 +172,7 @@ class DisplayFreezeUiTests(unittest.TestCase):
         self.assertEqual([data for _, data in writes if data.startswith(b"POSE ")], [b"POSE 20 2 100\n"])
         self.assertIn("RAW_TX 'POSE 20 2 100'", log)
         self.assertTrue(any(1.15 <= at < 1.2 and data == b"STOP\n" for at, data in writes))
-        self.assertFalse(any(data.startswith(b"JOG ") for _, data in writes))
+        self.assertFalse(any(at >= .6 and data.startswith(b"JOG ") for at, data in writes))
         self.assertTrue(all("DISPLAY FROZEN" in rows[0] for at, rows in frames if 0.8 <= at < 1.3))
 
     def test_stop_abort_focus_and_exit_remain_effective_while_frozen(self):

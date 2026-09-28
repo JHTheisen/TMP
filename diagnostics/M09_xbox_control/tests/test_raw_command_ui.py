@@ -87,7 +87,7 @@ class RawCommandUiTests(unittest.TestCase):
                 return 0.7
             return 0.0
         joystick.get_axis.side_effect = axis
-        schedule = [(0.6, [key(pygame.K_SPACE)]), (0.9, [key(pygame.K_F2)])] + list(actions)
+        schedule = [(0.9, [key(pygame.K_F2)])] + list(actions)
         schedule.sort(key=lambda action: action[0])
         sent = set()
         def events():
@@ -239,11 +239,11 @@ class RawCommandUiTests(unittest.TestCase):
         self.assertTrue(session.raw_mode)
         self.assert_no_jog_after(writes)
 
-    def test_leaving_editor_requires_a_new_centered_deliberate_arm(self):
+    def test_leaving_editor_requires_new_centered_half_second(self):
         _, writes, _, session, _ = self.run_ui([
             (1.15, [key(pygame.K_F2)]),
             (1.5, [key(pygame.K_SPACE)]),  # Not yet centered for half a second.
-            (2.0, [key(pygame.K_SPACE)]),
+
         ], until=2.3, rearm=True)
         self.assertFalse(session.raw_mode)
         self.assertFalse(any(0.9 <= stamp < 2.0 and data.startswith(b"JOG ") for stamp, data in writes))

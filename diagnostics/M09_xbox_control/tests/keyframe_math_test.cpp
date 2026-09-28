@@ -50,5 +50,10 @@ int main() {
     assert(!planAxis(0, 100, 60001, 80, 250, p));
     assert(!planAxis(0, 100, 10000, 0, 250, p));
     assert(!planAxis(0, 100, 10000, 80, 0, p));
+    assert(!planAxis(0, 7200, 5000, 1200, 1200, p));
+    assert(planAxis(0, 7200, 5000, 2400, 2400, p));
+    assert(fabs(p.predictedSeconds - 5) < .02);
+    assert(planAxis(0, 1000, 2000, 2000, 1000, p)); // Capped ramp, still feasible.
+    assert(!planAxis(0, 1, 20000, 2400, 2400, p)); // Sparse step resolution remains guarded.
     puts("PASS keyframe math: shared normalized progress, duration, signs, zero axes and infeasible limits");
 }
