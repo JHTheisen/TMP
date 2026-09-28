@@ -69,10 +69,15 @@ class SessionLog:
             signature = tuple(fields.get(key) for key in (
                 "available", "valid", "has_sample", "fresh", "accuracy", "raw_status", "accepted",
                 "reason", "euler_valid", "diagnostic_quality", "report_id", "north_usable", "status", "magnet_good", "active"))
-            self.sampled((prefix, fields.get("bus")), "RX", line + " | parsed=" + json.dumps(fields, sort_keys=True),
-                         now, 0.5, signature)
+            self.sampled((prefix, fields.get("bus")), "RX", line,
+             now, 5.0, signature)
         elif line in ("M09 READY", "M09 MANUAL", "M09 BUSY", "M09 ABORTED"):
             self.sampled("firmware_mode", "RX", line, now, 5.0, line)
+        elif prefix == "BNO_IO":
+            self.sampled("bno_io", "RX", line, now, 10.0)    
+        elif prefix == "BNO_TRACE":
+             trace_kind = fields.get("kind", "UNKNOWN")
+             self.sampled(("bno_trace", trace_kind), "RX", line, now, 5.0)    
         else:
             self.event("RX", line)
 
@@ -83,7 +88,7 @@ class SessionLog:
             signs = tuple(0 if int(value) == 0 else (1 if int(value) > 0 else -1) for value in fields)
             # Starts, stops and reversals are immediate; changing magnitude/held
             # velocity is sampled at 2 Hz instead of logging the 50 Hz stream.
-            self.sampled("jog", "TX_ATTEMPT", command, now, 0.5, signs)
+            self.sampled("jog", "TX_ATTEMPT", command, now, 2.0, signs)
         elif command == "STATUS":
             self.sampled("status", "TX_ATTEMPT", command, now, 5.0)
         else:
