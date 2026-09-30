@@ -229,9 +229,9 @@ def arguments(argv=None):
     parser.add_argument("--log-dir", default=str(Path(__file__).resolve().parent / "logs"),
                         help="directory for a new timestamped diagnostic log each run")
     parser.add_argument("--controller", type=int, default=0)
-    parser.add_argument("--yaw-axis", type=int, default=2, help="right stick horizontal; verify with --dry-run")
+    parser.add_argument("--yaw-axis", type=int, default=0, help="right stick horizontal; verify with --dry-run")
     parser.add_argument("--pitch-axis", type=int, default=1, help="left stick vertical; verify with --dry-run")
-    parser.add_argument("--carriage-axis", type=int, default=0, help="left stick horizontal; verify with --dry-run")
+    parser.add_argument("--carriage-axis", type=int, default=2, help="left stick horizontal; verify with --dry-run")
     parser.add_argument("--invert-carriage", action="store_true", help="reverse only the left/right carriage direction")
     parser.add_argument("--invert-yaw", action="store_true")
     parser.add_argument("--no-invert-pitch", action="store_true", help="default maps stick up (negative raw) to positive physical pitch")
@@ -363,7 +363,7 @@ def main(argv=None):
             raw = [joystick.get_axis(i) for i in range(joystick.get_numaxes())]
             yaw = stick_command(raw[args.yaw_axis], args.deadband, args.speed_scale, args.invert_yaw)
             pitch = stick_command(raw[args.pitch_axis], args.deadband, args.speed_scale, not args.no_invert_pitch)
-            carriage = stick_command(raw[args.carriage_axis], args.deadband, args.speed_scale, args.invert_carriage)
+            carriage = stick_command(raw[args.carriage_axis], args.deadband, args.speed_scale, True)
             now = time.monotonic()
             centered = all(abs(raw[index]) <= args.deadband for index in (args.yaw_axis, args.pitch_axis, args.carriage_axis))
             centered_since = (now if centered_since is None else centered_since) if centered and focused else None
@@ -544,7 +544,7 @@ def main(argv=None):
                 ("DISPLAY FROZEN | F3: resume latest | Controls, serial and logging remain LIVE"
                  if display_frozen else "DISPLAY LIVE | F3: freeze diagnostic values and scrolling responses only"),
                 f"{joystick.get_name()} | {'DRY RUN - SERIAL CLOSED' if args.dry_run else args.port + ' | ' + session.state.upper()}",
-                "Right stick horizontal = YAW; left stick vertical = PITCH; left stick horizontal = CARRIAGE.",
+               "Left stick horizontal = YAW; left stick vertical = PITCH; right stick horizontal = CARRIAGE."
                 f"Yaw axis {args.yaw_axis}, pitch axis {args.pitch_axis}, carriage axis {args.carriage_axis} | deadband {args.deadband:.2f} | speed scale {args.speed_scale:.2f}",
                 f"Yaw: {yaw:+5d}   Pitch: {pitch:+5d}   Carriage: {carriage:+5d}   Centered: {centered}   Ready: {session.ready}",
                 "Raw axes: " + "  ".join(f"{i}:{v:+.2f}" for i, v in enumerate(raw)),
