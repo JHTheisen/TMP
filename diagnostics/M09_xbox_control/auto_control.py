@@ -27,6 +27,8 @@ class AutoSession:
         self.action = None
         self.play_duration = 10
         self.settle_until = None
+        self.motion_started = None
+        self.raw_command = None
 
     @property
     def busy(self):
@@ -72,6 +74,26 @@ class AutoSession:
         ident = self._new_request(self.action, "SNAPSHOT", now)
         self.continuation = self._command(f"SNAP {ident}")
 
+    def raw_sent(self, command, now):
+        """Observe an explicitly sent autonomous command for the same takeover.
+
+        This does not parse/admit its arguments or generate a second request.
+        Idle raw editing still suppresses JOG; only an in-flight motion can be
+        reclaimed by deliberate sticks.
+        """
+        words = command.split()
+        if words and words[0] in ("LEVEL", "NORTH", "POSE", "MOVE", "KEYMOVE", "KEYRETURN"):
+            self.action = "raw"
+            self.raw_command = words[0]
+            self.phase = "MOVE_PENDING"
+            self.pending_id = self.continuation = None
+            self.deadline = now + 4.0
+            self.last_rx = now
+
+    def _alignment(self):
+        return self.action.upper() if self.action in ("level", "north") else (
+            self.raw_command if self.action == "raw" and self.raw_command in ("LEVEL", "NORTH") else None)
+
     def request(self, action, now, centered):
         if not self.enabled or self.phase != "READY":
             self.note = "Not queued: wait for current action to finish and release controls."
@@ -86,6 +108,7 @@ class AutoSession:
             self.note = "Capture B first."
             return None
         self.action = action
+        self.raw_command = None
         self.play_duration = self.duration
         self.phase = "PREFLIGHT_STOP"
         self.pending_id = self.continuation = None
@@ -104,6 +127,10 @@ class AutoSession:
         fields = dict(token.split("=", 1) for token in line.split() if "=" in token)
         if line.startswith(("M09_xbox_control:", "KEYFRAME_INVALIDATED ")) or line == "M09 ABORTED":
             self.invalidate(line)
+            if line.startswith("KEYFRAME_INVALIDATED ") and self._alignment():
+                # A forced watchdog stop loses captures but firmware may recover
+                # this BNO-dependent command. Do not invent a persistent host latch.
+                return
             self.cancel(now, self.note)
             if line == "M09 ABORTED":
                 self.phase = "FAULT"
@@ -114,6 +141,9 @@ class AutoSession:
             if self.phase == "PREFLIGHT_STOP":
                 if self.action in ("capture_a", "capture_b", "return_a", "play"):
                     self._snapshot(now)
+                elif self.action in ("level", "north"):
+                    self._new_request(self.action, "MOVE_PENDING", now)
+                    self.continuation = self._command(self.action.upper())
                 else:
                     moves = {"pitch_up": (0, self.increment), "pitch_down": (0, -self.increment),
                              "yaw_right": (self.increment, 0), "yaw_left": (-self.increment, 0)}
@@ -128,6 +158,35 @@ class AutoSession:
             elif self.phase in ("STOPPING", "FINISH_WAIT"):
                 self.phase = "READY"
                 self.deadline = None
+            elif self.action == "raw" and self.phase == "MOVE_ACTIVE":
+                self.phase = "READY"
+                self.pending_id = self.purpose = self.deadline = self.action = None
+            return
+        alignment = self._alignment()
+        if alignment and line.startswith(alignment + " ACCEPTED") and self.phase == "MOVE_PENDING":
+            self.phase = "MOVE_ACTIVE"
+            self.motion_started = now
+            self.deadline = None  # Firmware owns displacement/progress timing.
+        if alignment and line.startswith((alignment + " ACCEPTED", alignment + " DEADLINE", alignment + " RESUMED")):
+            if self.phase == "MOVE_ACTIVE":
+                try:
+                    duration = int(fields["deadline_ms"])
+                    if 0 < duration < 2147483648:
+                        self.deadline = self.motion_started + duration / 1000.0 + 5.0
+                except (ValueError, KeyError):
+                    pass
+            return
+        if alignment and line.startswith((alignment + " REJECTED:", alignment + " RESULT:")):
+            self._finish(line)
+            self.deadline = now + 4.0
+            return
+        if self.action == "raw" and line.startswith(("KEYMOVE ACCEPTED", "KEYMOVE RESULT", "KEYMOVE REJECTED", "KEYRETURN REJECTED")):
+            if line.startswith("KEYMOVE ACCEPTED"):
+                self.phase = "MOVE_ACTIVE"
+                self.deadline = None  # Firmware deadline, plus the common receive lease below.
+            else:
+                self._finish(line)
+                self.deadline = now + 4.0
             return
         matching = self.pending_id is not None and fields.get("id") == str(self.pending_id)
         if line.startswith("KEYFRAME_SNAPSHOT ") and matching and self.phase == "SNAPSHOT":
@@ -215,5 +274,6 @@ class AutoSession:
         return [f"MANUAL + KEYFRAMES | {self.phase} | increment {self.increment} deg | duration {self.duration} s",
                 "LB (4): capture A | RB (5): capture B | X button (2): duration | Home (10): Play A->B",
                 "LS click (8): return A | RS click (9): 1/2 deg | D-pad: up/down pitch, right/left yaw",
-                "A/Space/F12: STOP | B / keyboard X: abort | Move sticks to take over automatic motion",
+                "A (0): LEVEL pitch | Y (3): NORTH yaw (magnetic)",
+                "Space/F12: STOP | B / keyboard X: abort | Move sticks to take over automatic motion",
                 f"Generated steps (startup-relative, unhomed): {captures}", self.note]

@@ -33,6 +33,12 @@ constexpr uint32_t BASELINE_MS = 1000;
 constexpr uint32_t BNO_STALE_MS = 150, WINDOW_GAP_MS = 100, SETTLE_MS = 1000;
 constexpr uint32_t LEG_TIMEOUT_MS = 90000, PROGRESS_TIMEOUT_MS = 15000;
 constexpr double RELATIVE_LIMIT_DEG = 185.0, MAX_USABLE_PITCH_DEG = 75.0;
+constexpr double RUNAWAY_ERROR_RISE_DEG = 0.6;
+constexpr uint8_t RUNAWAY_CONFIRM_SAMPLES = 3;
+constexpr uint32_t RUNAWAY_CONFIRM_MS = 100;
+constexpr double NORTH_RUNAWAY_ERROR_RISE_DEG = 1.5;
+constexpr uint8_t NORTH_RUNAWAY_CONFIRM_SAMPLES = 4;
+constexpr uint32_t NORTH_RUNAWAY_CONFIRM_MS = 200;
 // First operator-commanded POSE: bounded precision corrections until measured
 // motion supplies timing. No assumed gearbox ratio or automatic startup move.
 constexpr double FIRST_POSE_MAX_ERROR_DEG = 3.0;
@@ -45,7 +51,7 @@ constexpr int32_t CARRIAGE_ACCELERATION = 2000;
 // Generated-step/manual travel is independent of the proven POSE precision caps.
 constexpr uint32_t PITCH_TRAVEL_SPEED_HZ = 2400;
 constexpr int32_t PITCH_TRAVEL_ACCELERATION = 2400;
-enum class Operation { NORTH_LEVEL, POSE, MANUAL };
+enum class Operation { NORTH_LEVEL, POSE, MANUAL, LEVEL, NORTH };
 
 enum class Phase { STARTUP, BASELINE, MOVING, SETTLING, COMPLETE, ABORTED, MANUAL };
 enum class Motion { PRECISION, SLEW, BRAKING, HOLD };
@@ -53,11 +59,15 @@ struct Axis {
     FastAccelStepper *motor = nullptr;
     bool pitch = false, settled = false, confirmed = false;
     double current = 0, target = 0, error = 0, bestError = 1e9, progressError = 1e9;
+    double previousErrorMagnitude = 0;
     Motion motion = Motion::PRECISION;
     bool finiteActive = false, observing = false, slewFinished = false, velocityReady = false;
+    bool previousErrorValid = false;
     double initialError = 0, velocityPosition = 0, angularSpeed = 0, peakAngularSpeed = 0, brakeAtDeg = 0;
     int slewDirection = 0;
     uint32_t bursts = 0, slewStarts = 0, motionSamples = 0, lastProgress = 0;
+    uint8_t divergenceSamples = 0;
+    uint32_t divergenceSince = 0;
     uint32_t commandAt = 0, stoppedAt = 0, velocityAt = 0;
 };
 struct Window {
@@ -87,8 +97,8 @@ bool manualActive = false, manualEnding = false;
 bool controlReady = false, bnoWatchdogReady = false, poseNeedsBno = true;
 struct ManualAxis {
     int request = 0, direction = 0;
-    uint32_t rate = 0, brakeAt = 0, stoppedAt = 0, progressAt = 0;
-    bool braking = false, observing = false;
+    uint32_t rate = 0, brakeAt = 0, stoppedAt = 0, startedAt = 0, progressAt = 0;
+    bool braking = false, observing = false, runningObserved = false;
     double start = 0, best = 0, progress = 0;
 };
 ManualAxis manualYaw, manualPitch, manualCarriage;
@@ -135,6 +145,43 @@ char commandLine[128];
 size_t commandLength = 0;
 bool commandOverflow = false;
 
+bool alignmentActive() { return poseActive && (operation == Operation::LEVEL || operation == Operation::NORTH); }
+bool pitchControlRequired() { return !alignmentActive() || operation == Operation::LEVEL; }
+const char *alignmentName() { return operation == Operation::LEVEL ? "LEVEL" : "NORTH"; }
+// LEVEL continuous slew and finite precision use separate FastAccelStepper APIs.
+// Powered tests established the current slew correction below, while the later
+// near-target test established that finite move() must retain the legacy signed
+// step convention. Manual and POSE/MOVE continue to use their existing mapping.
+constexpr int LEVEL_POSITIVE_BNO_PITCH_STEP_SIGN = -1;
+int bnoSlewStepSign(bool pitch) {
+    return pitch && alignmentActive() && operation == Operation::LEVEL ?
+        LEVEL_POSITIVE_BNO_PITCH_STEP_SIGN :
+        (pitch ? POSITIVE_STEP_PITCH_SIGN : TRIAL_POSITIVE_STEP_YAW_SIGN);
+}
+int bnoSlewStepDirection(double error, bool pitch) {
+    return (error > 0 ? 1 : -1) * bnoSlewStepSign(pitch);
+}
+int32_t bnoPrecisionCorrectionSteps(double error, bool confirmed, bool pitch) {
+    // Signed relative move() convention remains the physically established
+    // POSITIVE_STEP_PITCH_SIGN path; do not reuse LEVEL's continuous-run sign.
+    return correctionSteps(error, confirmed, pitch);
+}
+int bnoFeedbackStepSign(const Axis &axis) {
+    if (axis.pitch && alignmentActive() && operation == Operation::LEVEL &&
+        (axis.motion == Motion::SLEW || axis.motion == Motion::BRAKING)) {
+        return LEVEL_POSITIVE_BNO_PITCH_STEP_SIGN;
+    }
+    return axis.pitch ? POSITIVE_STEP_PITCH_SIGN : TRIAL_POSITIVE_STEP_YAW_SIGN;
+}
+void abortAlignment(const char *reason);
+void pauseAlignment(const char *reason);
+bool alignmentSafety();
+void updateAlignmentTiming(Axis &axis);
+uint32_t alignmentProgressTimeout(const Axis &axis);
+bool alignmentPaused = false;
+bool alignmentSampleInvalid = false;
+double alignmentPulsesPerDegree = 0;
+
 bool commandIdle() { return finalPrinted && phase == Phase::COMPLETE; }
 // All compared intervals are far below half the millis() range.
 bool sampleAtOrAfter(uint32_t sampleAt, uint32_t boundary) {
@@ -161,7 +208,10 @@ void learnTimingResponse() {
         yawSteps * yawDelta * TRIAL_POSITIVE_STEP_YAW_SIGN > 0) {
         yawPulsesPerDegree = fabs(yawSteps / yawDelta); yawTimingPeak = yawAxis.peakAngularSpeed;
     }
-    if (fabs(pitchDelta) >= DIRECTION_RESPONSE_DEG && fabs(pitchSteps) >= 8 &&
+    if (operation == Operation::LEVEL && alignmentPulsesPerDegree > 0) {
+        pitchPulsesPerDegree = alignmentPulsesPerDegree;
+        pitchTimingPeak = pitchAxis.peakAngularSpeed;
+    } else if (fabs(pitchDelta) >= DIRECTION_RESPONSE_DEG && fabs(pitchSteps) >= 8 &&
         pitchSteps * pitchDelta * POSITIVE_STEP_PITCH_SIGN > 0) {
         pitchPulsesPerDegree = fabs(pitchSteps / pitchDelta); pitchTimingPeak = pitchAxis.peakAngularSpeed;
     }
@@ -192,12 +242,25 @@ const char *motionText(const Axis &axis) {
     return "UNKNOWN";
 }
 void setMotion(Axis &axis, Motion motion) {
+    const Motion previous = axis.motion;
     axis.motion = motion;
+    // A continuous slew's best error is not a useful baseline for precision:
+    // the motor can coast while braking, then BNO/filter noise settles after
+    // it stops. Seed each side of that transition from its own measured error.
+    if (alignmentActive() && operation == Operation::NORTH &&
+        (motion == Motion::BRAKING || (previous == Motion::BRAKING && motion == Motion::PRECISION))) {
+        axis.bestError = fabs(axis.error);
+        axis.previousErrorMagnitude = fabs(axis.error);
+        axis.previousErrorValid = true;
+        axis.divergenceSamples = 0;
+        axis.divergenceSince = 0;
+    }
     char line[160];
     snprintf(line, sizeof(line), "AXIS %s -> %s error_deg=%.3f brake_at_deg=%.3f\n",
         axis.pitch ? "PITCH" : "YAW", motionText(axis), axis.error, axis.brakeAtDeg);
     queueText(line);
 }
+#include "pitch_direction_diagnostics.h"
 
 const char *phaseText() {
     switch (phase) { case Phase::STARTUP: return "STARTUP"; case Phase::BASELINE: return "BASELINE";
@@ -207,13 +270,25 @@ const char *phaseText() {
     return "UNKNOWN";
 }
 bool fresh(uint32_t now) { return bnoValid && reportEnabled && now - lastBnoGood < BNO_STALE_MS; }
+const char *northUnavailableReason(uint32_t now) {
+    if (!bnoInitialized) return "bno_unavailable";
+    if (!reportEnabled) return "rotation_report_disabled";
+    if (alignmentSampleInvalid) return "invalid_orientation_sample";
+    if (!hasPlausibleOrientation) return "heading_unavailable";
+    if (now - lastPlausibleAt >= BNO_STALE_MS) return "orientation_stale";
+    if (!bnoValid) return "orientation_not_accepted_current_epoch";
+    if (!heading.initialized || !isfinite(orientation.heading)) return "heading_invalid";
+    if (bnoAccuracy < BNO_MIN_ACCURACY) return "accuracy_below_2";
+    return "usable";
+}
+bool northHeadingUsable(uint32_t now) { return strcmp(northUnavailableReason(now), "usable") == 0; }
 #include "bno_lifecycle_diagnostics.h"
 void stopMotors() {
     const bool interrupted = (yawMotor && yawMotor->isRunning()) || (pitchMotor && pitchMotor->isRunning()) ||
         (carriageMotor && carriageMotor->isRunning());
-    if (yawMotor) yawMotor->forceStop();
-    if (pitchMotor) pitchMotor->forceStop();
-    if (carriageMotor) carriageMotor->forceStop();
+    if (yawMotor && yawMotor->isRunning()) yawMotor->forceStop();
+    if (pitchMotor && pitchMotor->isRunning()) pitchMotor->forceStop();
+    if (carriageMotor && carriageMotor->isRunning()) carriageMotor->forceStop();
     delay(25);
     digitalWrite(tmp_hardware::YAW_STEP_PIN, LOW);
     digitalWrite(tmp_hardware::PITCH_STEP_PIN, LOW);
@@ -222,6 +297,7 @@ void stopMotors() {
 }
 void finish(bool passed, const char *reason) {
     if (finalPrinted) return;
+    const bool wasAlignment = operation == Operation::LEVEL || operation == Operation::NORTH;
     const bool recoverable = !passed && poseActive;
     if (passed && poseActive && poseNeedsBno) learnTimingResponse();
     stopMotors(); motionWatchdog.disarm(); finalPrinted = true; window.active = false;
@@ -251,11 +327,11 @@ void finish(bool passed, const char *reason) {
         "BNO accuracy low episodes/recoveries/longest_ms=%lu/%lu/%lu\n"
         "Independent BNO stale watchdog tripped=%s\n"
         "Reason: %s\nFINAL RESULT: %s\n%s\n",
-        operation == Operation::MANUAL ? "XBOX MANUAL" : (operation == Operation::POSE ? "GO TO POSE" : "PRESERVED M08 NORTH / LEVEL"),
+        wasAlignment ? alignmentName() : (operation == Operation::MANUAL ? "XBOX MANUAL" : (operation == Operation::POSE ? "GO TO POSE" : "PRESERVED M08 NORTH / LEVEL")),
         orientation.heading, bnoAccuracy, northUsable ? "YES" : "NO",
         wrap360(heading.first + yawAxis.target), pitchAxis.target, baselineHeading, baselinePitch,
-        yawAxis.settled ? "YES" : "NO", yawAxis.error, static_cast<unsigned long>(yawAxis.bursts),
-        pitchAxis.settled ? "YES" : "NO", pitchAxis.error, static_cast<unsigned long>(pitchAxis.bursts),
+        wasAlignment && operation == Operation::LEVEL ? "NOT_REQUESTED" : (yawAxis.settled ? "YES" : "NO"), yawAxis.error, static_cast<unsigned long>(yawAxis.bursts),
+        wasAlignment && operation == Operation::NORTH ? "NOT_REQUESTED" : (pitchAxis.settled ? "YES" : "NO"), pitchAxis.error, static_cast<unsigned long>(pitchAxis.bursts),
         static_cast<unsigned long>(yawAxis.slewStarts), static_cast<unsigned long>(pitchAxis.slewStarts),
         static_cast<long>(carriageMotor ? carriageMotor->getCurrentPosition() : 0), static_cast<long>(carriageTarget),
         yawPulsesPerDegree, pitchPulsesPerDegree, concurrentMotion ? "YES" : "NO",
@@ -267,18 +343,26 @@ void finish(bool passed, const char *reason) {
         static_cast<unsigned long>(std::max(accuracyGrace.longestMs, accuracyGrace.age(millis()))),
         motionWatchdog.tripped() ? "YES" : "NO", reason, passed ? "PASS" : (recoverable ? "STOPPED" : "FAIL"),
         (passed || recoverable) ? "M09 READY" : "Latched abort; reset required. X/x aborts without automatic retry.");
-    poseActive = poseStopping = false; carriagePending = false;
+    poseActive = poseStopping = alignmentPaused = false; carriagePending = false;
+    // Terminal operation marker precedes READY so the existing host handoff
+    // never has to guess whether this particular request finished.
+    if (wasAlignment) {
+        queueText(alignmentName()); queueText(" RESULT: ");
+        queueText(passed ? "PASS\n" : (recoverable ? "STOPPED\n" : "FAIL\n"));
+    }
     queueText(summary);
     if (recoverable) { queueText("OPERATION FAILED: "); queueText(reason); queueText("\n"); }
 }
 void abortTest(const char *reason, bool latch = false) {
     if (keyframeActive) { stopKeyframe(reason, true, latch); return; }
+    if (alignmentActive() && !latch) { abortAlignment(reason); return; }
     if (latch) poseActive = false; // Explicit operator abort always remains latched.
     if (commandIdle()) finalPrinted = false;
     finish(false, reason);
     invalidateKeyframes(reason);
 }
 #include "pose_stop.h"
+#include "orientation_commands.h"
 bool checkSensorReset();
 void safety() {
     checkSensorReset();
@@ -288,7 +372,10 @@ void safety() {
         stopManualSession("command stream lost for 250 ms; rearm centered"); return;
     }
     if (manualActive || finalPrinted || !poseActive || poseStopping) return;
-    if (millis() - controlStartedAt >= LEG_TIMEOUT_MS) { abortTest("Pose control timeout"); return; }
+    // LEVEL/NORTH have selected-axis guards and recoverable feedback handling.
+    // Do not apply combined-POSE yaw/pitch guards to their inactive axes.
+    if (alignmentActive()) { alignmentSafety(); return; }
+    if (!alignmentActive() && millis() - controlStartedAt >= LEG_TIMEOUT_MS) { abortTest("Pose control timeout"); return; }
     if (!poseNeedsBno) return;
     const uint32_t now = millis(); bnoMaxGap = std::max(bnoMaxGap, now - lastBnoGood);
     if (motionWatchdog.tripped() || now - lastBnoGood >= BNO_STALE_MS) abortTest("BNO085 feedback stale: acquisition gap reached 150 ms");
@@ -303,7 +390,8 @@ void invalidateOrientation(const char *reason) {
     bnoValid = pitchReady = referenceSet = northUsable = false;
     heading = {}; window.active = false;
     if (hadData) { queueText("BNO WARNING: "); queueText(reason); queueText("\n"); }
-    if (poseActive && poseNeedsBno && !poseStopping) abortTest(reason);
+    if (alignmentActive() && !poseStopping) pauseAlignment(reason);
+    else if (poseActive && poseNeedsBno && !poseStopping) abortTest(reason);
 }
 bool checkSensorReset() {
     const uint32_t epoch = sensorWorker.resetEpoch.load(std::memory_order_acquire);
@@ -369,6 +457,8 @@ void serviceBno() {
     EulerAngles result;
     if (!quaternionToEuler(event.un.rotationVector, result)) {
         bnoDiagnostics.reason = "invalid_quaternion";
+        alignmentSampleInvalid = true;
+        if (alignmentActive()) invalidateOrientation("invalid BNO orientation");
         ++invalidVectors; window.interrupted = true; return;
     }
     bnoDiagnostics.euler = result; bnoDiagnostics.eulerValid = true;
@@ -381,17 +471,20 @@ void serviceBno() {
     bnoDiagnostics.accepted = true; bnoDiagnostics.reason = "accepted";
     acceptedBnoSequence = event.sequence; acceptedBnoTimestamp = event.timestamp;
     bnoValid = true; lastBnoGood = now;
-    if (poseActive && poseNeedsBno && !poseStopping) {
+    alignmentSampleInvalid = false;
+    if (poseActive && poseNeedsBno && !poseStopping && !alignmentPaused) {
         motionWatchdog.recordFresh(now);
     }
     if (accuracyRequired && referenceSet && !finalPrinted) {
         const bool wasLow = accuracyGrace.low;
         accuracyGrace.observe(event.status, now);
-        northUsable = event.status >= BNO_MIN_ACCURACY;
+        northUsable = northHeadingUsable(millis());
         if (!wasLow && accuracyGrace.low) queueText("BNO ACCURACY LOW: north-dependent positioning unavailable\n");
         if (wasLow && !accuracyGrace.low) queueText("BNO ACCURACY RECOVERED: continuous low timer cleared\n");
     }
-    northUsable = bnoAccuracy >= BNO_MIN_ACCURACY && referenceSet;
+    // Direct NORTH readiness describes this accepted magnetic-heading sample.
+    // referenceSet remains the separate, idle-qualified baseline used by POSE.
+    northUsable = northHeadingUsable(now);
     safety(); if (phase == Phase::ABORTED) return;
     if (yawMotor && yawMotor->isRunning()) { ++yawAxis.motionSamples; sawYawMotion = true; }
     if (pitchMotor && pitchMotor->isRunning()) { ++pitchAxis.motionSamples; sawPitchMotion = true; }
@@ -436,14 +529,30 @@ void serviceReference() {
     if (stableBaseline()) {
         baselineHeading = wrap360(heading.first + window.heading.mean());
         northTargetContinuous = window.heading.mean() + shortestDifference(0, baselineHeading);
-        referenceSet = northUsable = pitchReady = true;
+        referenceSet = pitchReady = true;
+        northUsable = northHeadingUsable(millis());
         queueText("REFERENCE: qualified magnetic north available; no automatic movement\n");
         window.active = false;
     } else startBaseline();
 }
 bool axisProgress(Axis &axis, double error) {
     const double magnitude = fabs(error); const uint32_t now = millis(); axis.error = error;
-    if (magnitude > axis.bestError + 0.6) { abortTest(axis.pitch ? "Pitch wrong-direction/runaway guard" : "Yaw wrong-direction/runaway guard"); return false; }
+    const bool northRunaway = alignmentActive() && operation == Operation::NORTH;
+    const double riseThreshold = northRunaway ? NORTH_RUNAWAY_ERROR_RISE_DEG : RUNAWAY_ERROR_RISE_DEG;
+    const uint8_t requiredSamples = northRunaway ? NORTH_RUNAWAY_CONFIRM_SAMPLES : RUNAWAY_CONFIRM_SAMPLES;
+    const uint32_t requiredMs = northRunaway ? NORTH_RUNAWAY_CONFIRM_MS : RUNAWAY_CONFIRM_MS;
+    const bool continuingRise = axis.previousErrorValid && magnitude > axis.previousErrorMagnitude + 0.05;
+    const bool canObserveDivergence = axis.motion != Motion::BRAKING && !axis.observing;
+    if (canObserveDivergence && magnitude > axis.bestError + riseThreshold && continuingRise) {
+        if (!axis.divergenceSamples) axis.divergenceSince = now;
+        ++axis.divergenceSamples;
+        if (axis.divergenceSamples >= requiredSamples && now - axis.divergenceSince >= requiredMs) {
+            abortTest(axis.pitch ? "Pitch wrong-direction/runaway guard" : "Yaw wrong-direction/runaway guard"); return false;
+        }
+    } else {
+        axis.divergenceSamples = 0; axis.divergenceSince = 0;
+    }
+    axis.previousErrorMagnitude = magnitude; axis.previousErrorValid = true;
     // Compare cumulative response to the fixed run start, not bestError, which
     // advances every sample and used to leave gradual yaw motion in trials forever.
     if (!axis.pitch && axis.bursts && !axis.confirmed && magnitude <= axis.initialError - DIRECTION_RESPONSE_DEG) {
@@ -453,7 +562,9 @@ bool axisProgress(Axis &axis, double error) {
     axis.bestError = fmin(axis.bestError, magnitude);
     if (magnitude <= axis.progressError - 0.15) { axis.progressError = magnitude; axis.lastProgress = lastBnoGood; }
     if (magnitude <= TOLERANCE_DEG) axis.lastProgress = lastBnoGood;
-    const uint32_t timeout = axis.motion == Motion::SLEW ? SLEW_PROGRESS_TIMEOUT_MS : PROGRESS_TIMEOUT_MS;
+    if (alignmentActive()) updateAlignmentTiming(axis);
+    const uint32_t timeout = alignmentActive() ? alignmentProgressTimeout(axis) :
+        (axis.motion == Motion::SLEW ? SLEW_PROGRESS_TIMEOUT_MS : PROGRESS_TIMEOUT_MS);
     if (magnitude > TOLERANCE_DEG && now - axis.lastProgress >= timeout) {
         abortTest(axis.pitch ? "No measured pitch progress: axis deadline expired" : "No measured yaw progress: axis deadline expired"); return false;
     }
@@ -473,27 +584,40 @@ void updateVelocity(Axis &axis, uint32_t now) {
 }
 void commandAxis(Axis &axis) {
     safety();
-    if (finalPrinted || poseStopping || !fresh(millis()) || motionWatchdog.tripped() || axis.motor->isRunning()) return;
+    if (finalPrinted || poseStopping || alignmentPaused || !fresh(millis()) || motionWatchdog.tripped() || axis.motor->isRunning()) return;
     if (!axis.pitch && !yawRequired) return;
     if (!posePrecisionOnly && axis.confirmed && !axis.slewFinished &&
         fabs(axis.error) > axis.brakeAtDeg + SLEW_ENTRY_HYSTERESIS_DEG) {
-        axis.slewDirection = stepDirection(axis.error, axis.pitch);
-        if (axis.motor->setAcceleration(slewAcceleration(axis.pitch)) != 0 ||
-            axis.motor->setSpeedInHz(limitedSpeed(axis, slewSpeed(axis.pitch))) != 0 ||
-            (axis.slewDirection > 0 ? axis.motor->runForward() : axis.motor->runBackward()) != MOVE_OK) {
+        axis.slewDirection = bnoSlewStepDirection(axis.error, axis.pitch);
+        const int32_t acceleration = alignmentActive() && axis.pitch ? PITCH_TRAVEL_ACCELERATION : slewAcceleration(axis.pitch);
+        const uint32_t speed = alignmentActive() && axis.pitch ? PITCH_TRAVEL_SPEED_HZ : slewSpeed(axis.pitch);
+        int result = static_cast<int>(axis.motor->setAcceleration(acceleration));
+        if (result == 0) result = static_cast<int>(axis.motor->setSpeedInHz(limitedSpeed(axis, speed)));
+        const char *call = axis.slewDirection > 0 ? "runForward" : "runBackward";
+        if (result == 0) result = static_cast<int>(axis.slewDirection > 0 ?
+            axis.motor->runForward() : axis.motor->runBackward());
+        if (axis.pitch) traceLevelPitchDirection("COMMAND", axis, "SLEW", axis.error > 0 ? 1 : -1,
+            axis.slewDirection, call, result);
+        if (result != static_cast<int>(MOVE_OK)) {
             abortTest(axis.pitch ? "FastAccelStepper pitch slew rejected" : "FastAccelStepper yaw slew rejected"); return;
         }
+        if (axis.pitch) armLevelPitchDirectionCheck(axis.error > 0 ? 1 : -1, axis.slewDirection);
         ++axis.slewStarts; axis.commandAt = millis(); axis.lastProgress = millis();
         setMotion(axis, Motion::SLEW);
     } else {
-        int32_t steps = correctionSteps(axis.error, axis.confirmed, axis.pitch);
+        int32_t steps = bnoPrecisionCorrectionSteps(axis.error, axis.confirmed, axis.pitch);
         if (posePrecisionOnly) steps = std::max(-FIRST_POSE_BURST_STEPS, std::min(FIRST_POSE_BURST_STEPS, steps));
         if (!steps) return;
-        if (axis.motor->setAcceleration(ACCELERATION) != 0 ||
-            axis.motor->setSpeedInHz(limitedSpeed(axis, correctionSpeed(axis.error, axis.confirmed))) != 0 ||
-            axis.motor->move(steps) != MOVE_OK) {
+        int result = static_cast<int>(axis.motor->setAcceleration(ACCELERATION));
+        if (result == 0) result = static_cast<int>(axis.motor->setSpeedInHz(
+            limitedSpeed(axis, correctionSpeed(axis.error, axis.confirmed))));
+        if (result == 0) result = static_cast<int>(axis.motor->move(steps));
+        if (axis.pitch) traceLevelPitchDirection("COMMAND", axis, "PRECISION", axis.error > 0 ? 1 : -1,
+            steps, "move", result);
+        if (result != static_cast<int>(MOVE_OK)) {
             abortTest(axis.pitch ? "FastAccelStepper pitch correction rejected" : "FastAccelStepper yaw correction rejected"); return;
         }
+        if (axis.pitch) armLevelPitchDirectionCheck(axis.error > 0 ? 1 : -1, steps > 0 ? 1 : -1);
         ++axis.bursts; axis.finiteActive = true; axis.commandAt = millis();
     }
     // If the independent watchdog raced this command, stop again immediately.
@@ -502,11 +626,16 @@ void commandAxis(Axis &axis) {
 void serviceAxis(Axis &axis, uint32_t now, uint32_t sampleAt) {
     updateVelocity(axis, sampleAt);
     if (axis.motion == Motion::SLEW) {
-        if (!axis.motor->isRunning()) { abortTest("Continuous slew stopped unexpectedly"); return; }
-        if (fabs(axis.error) <= axis.brakeAtDeg || stepDirection(axis.error, axis.pitch) != axis.slewDirection) {
+        if (!axis.motor->isRunning()) {
+            if (now - axis.commandAt < PRECISION_OBSERVE_MS) return;
+            abortTest("Continuous slew stopped unexpectedly"); return;
+        }
+        if (fabs(axis.error) <= axis.brakeAtDeg || bnoSlewStepDirection(axis.error, axis.pitch) != axis.slewDirection) {
             // stopMove keeps the slew acceleration already applied by run*().
             // Do not change rates or issue a reversal until isRunning is false.
             axis.motor->stopMove(); axis.commandAt = now; axis.slewFinished = true;
+            if (axis.pitch) traceLevelPitchDirection("BRAKE", axis, "BRAKE", axis.error > 0 ? 1 : -1,
+                axis.slewDirection, "stopMove", static_cast<int>(MOVE_OK));
             setMotion(axis, Motion::BRAKING);
         }
         return;
@@ -518,7 +647,15 @@ void serviceAxis(Axis &axis, uint32_t now, uint32_t sampleAt) {
             return;
         }
         axis.finiteActive = false; axis.observing = true; axis.stoppedAt = now;
-        if (axis.motion == Motion::BRAKING) setMotion(axis, Motion::PRECISION);
+        if (axis.motion == Motion::BRAKING) {
+            axis.bestError = axis.progressError = fabs(axis.error); axis.divergenceSamples = 0; axis.divergenceSince = 0;
+            axis.previousErrorMagnitude = fabs(axis.error); axis.previousErrorValid = true; axis.lastProgress = sampleAt;
+            setMotion(axis, Motion::PRECISION);
+            if (axis.pitch && alignmentActive() && operation == Operation::LEVEL) {
+                alignmentTimingAngle = axis.current;
+                alignmentTimingSteps = axis.motor->getCurrentPosition();
+            }
+        }
         return;
     }
     // Queue delivery time cannot establish a post-stop observation. Require a
@@ -531,13 +668,14 @@ void serviceAxis(Axis &axis, uint32_t now, uint32_t sampleAt) {
         if (fabs(axis.error) <= TOLERANCE_DEG) return;
         axis.settled = false; setMotion(axis, Motion::PRECISION);
     }
-    if (fabs(axis.error) <= APPROACH_DEADBAND_DEG) {
+    if (fabs(axis.error) <= (alignmentActive() ? TOLERANCE_DEG : APPROACH_DEADBAND_DEG)) {
         setMotion(axis, Motion::HOLD); return;
     }
     commandAxis(axis);
 }
 void serviceAxes() {
-    if (poseStopping) return;
+    serviceLevelPitchDirectionCheck();
+    if (poseStopping || alignmentPaused) return;
     if (!poseNeedsBno) {
         if (carriagePending) {
             if (carriageMotor->setAcceleration(CARRIAGE_ACCELERATION) != 0 ||
@@ -569,10 +707,12 @@ void serviceAxes() {
     yawAxis.current = heading.continuous; yawAxis.error = yawAxis.target - yawAxis.current;
     pitchAxis.current = physicalPitch(); pitchAxis.error = pitchAxis.target - pitchAxis.current;
     // Absolute POSE always checks yaw; MOVE 0 dp ds explicitly leaves yaw uncontrolled.
-    if ((yawRequired && !axisProgress(yawAxis, yawAxis.error)) || !axisProgress(pitchAxis, pitchAxis.error)) return;
+    if ((yawRequired && !axisProgress(yawAxis, yawAxis.error)) ||
+        (pitchControlRequired() && !axisProgress(pitchAxis, pitchAxis.error))) return;
     if (yawRequired) serviceAxis(yawAxis, now, sampleAt);
     if (finalPrinted) return;
-    serviceAxis(pitchAxis, now, sampleAt); if (finalPrinted) return;
+    if (pitchControlRequired()) serviceAxis(pitchAxis, now, sampleAt);
+    if (finalPrinted || poseStopping || alignmentPaused) return;
     if (carriagePending) {
         safety(); if (finalPrinted) return;
         if (carriageMotor->setAcceleration(CARRIAGE_ACCELERATION) != 0 || carriageMotor->setSpeedInHz(carriageRateHz) != 0 ||
@@ -588,7 +728,8 @@ void serviceAxes() {
         !yawAxis.observing && !pitchAxis.observing &&
         !yawMotor->isRunning() && !pitchMotor->isRunning() &&
         carriageStoppedAtTarget &&
-        (!yawRequired || fabs(yawAxis.error) <= TOLERANCE_DEG) && fabs(pitchAxis.error) <= TOLERANCE_DEG &&
+        (!yawRequired || fabs(yawAxis.error) <= TOLERANCE_DEG) &&
+        (!pitchControlRequired() || fabs(pitchAxis.error) <= TOLERANCE_DEG) &&
         (!accuracyRequired || bnoAccuracy >= BNO_MIN_ACCURACY);
     if (!stoppedInTolerance) { phase = Phase::MOVING; settleSamples = 0; return; }
     if (!settleSamples || sampleAt - settleLastSample > WINDOW_GAP_MS) {
@@ -596,9 +737,10 @@ void serviceAxes() {
     }
     phase = Phase::SETTLING; ++settleSamples; settleLastSample = sampleAt;
     if (sampleAt - settleStarted >= SETTLE_MS && settleSamples >= 30) {
-        yawAxis.settled = referenceSet && fabs(yawAxis.error) <= TOLERANCE_DEG;
-        pitchAxis.settled = true;
-        if (poseActive) finish(true, !yawRequired ? "Pitch target stopped and settled; yaw control disabled" :
+        yawAxis.settled = (alignmentActive() ? yawRequired : referenceSet) && fabs(yawAxis.error) <= TOLERANCE_DEG;
+        pitchAxis.settled = pitchControlRequired();
+        if (alignmentActive()) finish(true, operation == Operation::LEVEL ? "LEVEL: physical pitch zero settled" : "NORTH: magnetic heading zero settled");
+        else if (poseActive) finish(true, !yawRequired ? "Pitch target stopped and settled; yaw control disabled" :
             "POSE complete: BNO angle targets settled; carriage generated-step target reached");
         else finish(true, "Measured axes stopped and settled");
     }
@@ -760,6 +902,7 @@ void executeCommand() {
     if (!count) return;
     if (executeManualCommand(tokens, count)) return;
     if (executeKeyframeCommand(tokens, count)) return;
+    if (executeOrientationCommand(tokens, count)) return;
     if (count != 4 || (strcmp(tokens[0], "POSE") != 0 && strcmp(tokens[0], "MOVE") != 0)) {
         rejectPose("use POSE yaw_deg pitch_deg carriage_steps or MOVE delta_yaw_deg delta_pitch_deg delta_steps"); return;
     }
@@ -795,7 +938,7 @@ void telemetry() {
         "STATE %s heading=%.3f yaw_error=%.3f pitch=%.3f pitch_error=%.3f "
         "yaw_mode=%s pitch_mode=%s yaw_motor=%s pitch_motor=%s concurrent=%s "
         "yaw_hz=%.1f pitch_hz=%.1f yaw_dps=%.2f pitch_dps=%.2f brake_deg=%.2f/%.2f "
-        "BNO_fresh=%s age_ms=%lu max_gap_ms=%lu accuracy=%u accuracy_low_ms=%lu north_usable=%s\n",
+        "BNO_fresh=%s age_ms=%lu max_gap_ms=%lu accuracy=%u accuracy_low_ms=%lu north_usable=%s north_reason=%s\n",
         phaseText(), orientation.heading, yawAxis.error, physicalPitch(), pitchAxis.error,
         motionText(yawAxis), motionText(pitchAxis), yawRunning ? "MOVING" : "IDLE", pitchRunning ? "MOVING" : "IDLE",
         yawRunning && pitchRunning ? "YES" : "NO",
@@ -804,7 +947,7 @@ void telemetry() {
         yawAxis.angularSpeed, pitchAxis.angularSpeed, yawAxis.brakeAtDeg, pitchAxis.brakeAtDeg,
         fresh(now) ? "YES" : "NO", static_cast<unsigned long>(now - lastBnoGood),
         static_cast<unsigned long>(bnoMaxGap), bnoAccuracy, static_cast<unsigned long>(accuracyGrace.age(now)),
-        northUsable ? "YES" : "NO");
+        northHeadingUsable(now) ? "YES" : "NO", northUnavailableReason(now));
     queueText(line);
     if (poseActive || commandIdle()) {
         char poseLine[220];
@@ -819,9 +962,11 @@ void telemetry() {
 void sensorTelemetry() {
     const uint32_t now = millis();
     char line[850];
-    snprintf(line, sizeof(line), "BNO_STATE available=%s fresh=%s age_ms=%lu accuracy=%u north_usable=%s heading=%.3f physical_pitch=%.3f pitch_axis=PITCH pitch_roll=%.3f has_sample=%s accepted_seq=%u accepted_sensor_us=%llu accepted_rx_ms=%lu\n",
+    const char *northReason = northUnavailableReason(now);
+    snprintf(line, sizeof(line), "BNO_STATE available=%s fresh=%s age_ms=%lu accuracy=%u north_usable=%s north_reason=%s heading=%.3f physical_pitch=%.3f pitch_axis=PITCH pitch_roll=%.3f has_sample=%s accepted_seq=%u accepted_sensor_us=%llu accepted_rx_ms=%lu\n",
         bnoInitialized && reportEnabled ? "YES" : "NO", fresh(now) ? "YES" : "NO",
-        static_cast<unsigned long>(hasPlausibleOrientation ? now - lastPlausibleAt : UINT32_MAX), lastPlausibleAccuracy, northUsable && fresh(now) ? "YES" : "NO",
+        static_cast<unsigned long>(hasPlausibleOrientation ? now - lastPlausibleAt : UINT32_MAX), lastPlausibleAccuracy,
+        strcmp(northReason, "usable") == 0 ? "YES" : "NO", northReason,
         lastPlausibleOrientation.heading, physicalPitch(lastPlausibleOrientation), lastPlausibleOrientation.roll, hasPlausibleOrientation ? "YES" : "NO", acceptedBnoSequence,
         static_cast<unsigned long long>(acceptedBnoTimestamp), static_cast<unsigned long>(lastBnoGood));
     queueText(line);

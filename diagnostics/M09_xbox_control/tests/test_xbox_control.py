@@ -32,9 +32,9 @@ class InputTests(unittest.TestCase):
 
     def test_cli_defaults_and_bounds(self):
         args = arguments([])
-        self.assertEqual((args.yaw_axis, args.pitch_axis, args.speed_scale), (2, 1, 1.0))
+        self.assertEqual((args.yaw_axis, args.pitch_axis, args.speed_scale), (0, 1, 1.0))
         self.assertEqual(arguments(["--speed-scale", "0.25"]).speed_scale, 0.25)
-        self.assertEqual(args.carriage_axis, 0)
+        self.assertEqual(args.carriage_axis, 2)
         self.assertFalse(args.invert_carriage)
         self.assertTrue(arguments(["--invert-carriage"]).invert_carriage)
         self.assertEqual(arguments(["--speed-scale", "1"]).speed_scale, 1.0)

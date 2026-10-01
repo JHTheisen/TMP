@@ -67,7 +67,7 @@ class DisplayFreezeUiTests(unittest.TestCase):
         joystick.get_numaxes.return_value = 6
         joystick.get_instance_id.return_value = 42
         joystick.get_name.return_value = "Simulated Xbox freeze test"
-        joystick.get_axis.side_effect = lambda index: (0.7 if clock.now < 1.0 else -0.7) if index == 2 and clock.now > 0.72 else 0.0
+        joystick.get_axis.side_effect = lambda index: (0.7 if clock.now < 1.0 else -0.7) if index == 0 and clock.now > 0.72 and not raw else 0.0
         schedule = [(0.6, [key(pygame.K_F2)] if raw else []),
                     (0.8, [key(pygame.K_F3)]),
                     (0.85, [key(pygame.K_F3, repeat=True)]),
@@ -178,7 +178,6 @@ class DisplayFreezeUiTests(unittest.TestCase):
     def test_stop_abort_focus_and_exit_remain_effective_while_frozen(self):
         for raw in (False, True):
             for event, abort in ((key(pygame.K_SPACE), False), (key(pygame.K_F12), False),
-                                 (pygame.event.Event(pygame.JOYBUTTONDOWN, instance_id=42, button=0), False),
                                  (key(pygame.K_x), True),
                                  (pygame.event.Event(pygame.JOYBUTTONDOWN, instance_id=42, button=1), True),
                                  (key(pygame.K_ESCAPE), False),

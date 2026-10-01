@@ -24,7 +24,13 @@ int main(int argc,char **argv) {
     if(scenario=="sensor_independent") simulated::busBInitFails=true;
     setup(); advance(50); CHECK(commandIdle());
     line("JOG 0 0 0"); CHECK(manualActive);
-    if(scenario=="protocol") {
+    if(scenario=="delayed_start") {
+        simulated::continuousStartDelayMs=250;
+        stream(500,320);
+        CHECK(manualActive && carriageMotor->isRunning());
+        CHECK(Serial.output.find("CARRIAGE continuous motor stopped unexpectedly")==std::string::npos);
+        simulated::continuousStartDelayMs=0;
+    } else if(scenario=="protocol") {
         line("JOG 0 0 0.5"); line("JOG 0 0 1001"); line("JOG 0 0 nan");
         CHECK(simulated::commands.empty());
         stream(500,500); CHECK(carriageMotor->isRunning());

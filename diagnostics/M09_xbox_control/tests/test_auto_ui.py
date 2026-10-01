@@ -53,6 +53,8 @@ class AutoUiTests(unittest.TestCase):
             positions = (100, -200, 300)
             axes = [0.0] * 6
             completion = None
+            outcome = "PASS"
+            motion_duration = .2
             closed = False
             @property
             def in_waiting(self):
@@ -77,9 +79,13 @@ class AutoUiTests(unittest.TestCase):
                     self.mode = "BUSY"
                     self.rx += f"KEYMOVE ACCEPTED id={words[1]} epoch=42 duration_ms={words[6] if len(words) == 7 else 200}\nM09 BUSY\n".encode()
                     self.completion = (clock.now + .2, words[1], tuple(int(value) for value in words[3:6]))
-                elif words[0] == "MOVE":
+                elif words[0] in ("LEVEL", "NORTH"):
                     self.mode = "BUSY"
-                    self.rx += b"PITCH-ONLY ACCEPTED: fixture\nM09 BUSY\n"
+                    self.rx += f"{words[0]} ACCEPTED deadline_ms=90000\nM09 BUSY\n".encode()
+                    self.completion = (clock.now + self.motion_duration, words[0], self.positions)
+                elif words[0] in ("MOVE", "POSE"):
+                    self.mode = "BUSY"
+                    self.rx += b"POSE ACCEPTED: fixture\nM09 BUSY\n"
                     self.completion = (clock.now + .2, None, self.positions)
                 elif words[0] == "JOG" and self.mode == "READY":
                     self.mode = "MANUAL"
@@ -103,10 +109,15 @@ class AutoUiTests(unittest.TestCase):
                 _, ident, port.positions = port.completion
                 port.completion = None
                 port.mode = "READY"
-                port.rx += (f"KEYMOVE RESULT id={ident} epoch=42 status=PASS yaw_steps={port.positions[0]} "
-                            f"pitch_steps={port.positions[1]} carriage_steps={port.positions[2]} elapsed_ms=10000 concurrent_axes=3\n".encode()
-                            if ident else b"FINAL RESULT: PASS\n")
+                if ident in ("LEVEL", "NORTH"):
+                    port.rx += f"{ident} RESULT: {port.outcome}\nFINAL RESULT: {port.outcome}\n".encode()
+                else:
+                    port.rx += (f"KEYMOVE RESULT id={ident} epoch=42 status=PASS yaw_steps={port.positions[0]} "
+                                f"pitch_steps={port.positions[1]} carriage_steps={port.positions[2]} elapsed_ms=10000 concurrent_axes=3\n".encode()
+                                if ident else b"FINAL RESULT: PASS\n")
                 port.rx += b"M09 READY\n"
+                if port.outcome != "PASS":
+                    port.rx += b"OPERATION FAILED: BNO recovery expired\n"
             values = []
             for index, (at, items) in enumerate(schedule):
                 if clock.now >= at and index not in sent:
@@ -211,7 +222,7 @@ class AutoUiTests(unittest.TestCase):
         self.assertIn("A", auto.frames)
 
     def test_stop_and_abort_win_over_play_in_same_batch(self):
-        for safety in (key(pygame.K_SPACE), button(0), key(pygame.K_F12), key(pygame.K_F2),
+        for safety in (key(pygame.K_SPACE), key(pygame.K_F12), key(pygame.K_F2),
                        button(1), key(pygame.K_x), pygame.event.Event(pygame.WINDOWFOCUSLOST)):
             with self.subTest(safety=safety):
                 _, writes, _, _, _, _ = self.run_ui([
@@ -255,16 +266,87 @@ class AutoUiTests(unittest.TestCase):
         self.assertEqual(len([data for _, data in writes if data.startswith(b"SNAP")]), 3)
         self.assertIn("Home (10): Play A->B", "\n".join(frames[-1][1]))
 
-    def test_increment_duration_diagonals_and_dry_input_diagnostics(self):
+    def test_increment_duration_diagonals_and_cardinals(self):
         _, writes, _, auto, _, log = self.run_ui([
             (.7, tap(9) + tap(2)), (.8, [hat((1, 1))]),
             (1.0, [hat((0, 0)), hat((1, 0))])])
+        self.assertFalse(any(data in (b"LEVEL\n", b"NORTH\n") for _, data in writes))
         self.assertEqual([data for _, data in writes if data.startswith(b"MOVE")], [b"MOVE 2 0 0\n"])
         self.assertEqual(auto.duration, 20)
         self.assertIn("Controller hat 0: (1, 1)", log)
         _, _, _, _, frames, log = self.run_ui([(.7, [hat((0, 1))])], dry_run=True)
         self.assertIn("AUTO_TX", log)
         self.assertTrue(any(any("Controller hat 0: (0, 1)" in row for row in rows) for _, rows in frames))
+
+    def test_a_level_y_north_are_single_edge_requests_and_diagonals_do_nothing(self):
+        _, writes, _, _, frames, _ = self.run_ui([
+            (.7, [button(0)]), (.72, [button(0)]), (.9, [button(0, True)]),
+            (1.3, [button(3)]), (1.32, [button(3)]), (1.5, [button(3, True)]),
+            (1.9, [hat((1, 1))]), (2.0, [hat((0, 0))]),
+            (2.1, [hat((-1, 1))]), (2.2, [hat((0, 0))]),
+            (2.3, [hat((1, -1))]), (2.4, [hat((0, 0))]),
+            (2.5, [hat((-1, -1))])], until=2.9)
+        self.assertEqual([data for _, data in writes if data in (b"LEVEL\n", b"NORTH\n")], [b"LEVEL\n", b"NORTH\n"])
+        self.assertEqual([data for at, data in writes if .69 <= at < .9 and data == b"STOP\n"], [b"STOP\n"])
+        self.assertIn("A (0): LEVEL pitch", "\n".join(frames[-1][1]))
+
+    def test_alignment_and_keyframe_sequences_return_to_manual_without_operator_rearm(self):
+        for sequence in (("play",), ("level",), ("north",), ("level","play"), ("north","play"),
+                         ("play","level"), ("level","north"), ("north","level"), ("level","north","level","north")):
+            with self.subTest(sequence=sequence):
+                actions = [(.8, tap(4)), (1.4, tap(5))]
+                for index, action in enumerate(sequence):
+                    event = {"level": tap(0), "north": tap(3), "play": tap(10)}[action]
+                    actions.append((2.0 + index * .8, event))
+                manual_at = 2.0 + len(sequence)*.8
+                actions.append((manual_at, lambda port: port.axes.__setitem__(1, -.8)))
+                result, writes, _, auto, _, _ = self.run_ui(actions, until=manual_at+.4)
+                self.assertEqual(result, 0)
+                expected = [{"level": b"LEVEL", "north": b"NORTH", "play": b"KEYMOVE"}[action] for action in sequence]
+                actual = [data.split()[0] for _,data in writes if data.split()[0] in (b"LEVEL",b"NORTH",b"KEYMOVE")]
+                self.assertEqual(actual, expected)
+                self.assertEqual(len(auto.frames), 2)
+                self.assertTrue(any(at>=manual_at and data==b"JOG 0 585 0\n" for at,data in writes))
+                self.assertFalse(any(data==b"X\n" for _,data in writes))
+
+    def test_deliberate_sticks_take_over_alignment_and_raw_autonomous_then_actions_still_work(self):
+        for request in ("LEVEL", "NORTH", "POSE 290 -40 300", "MOVE 0 1 0", "KEYMOVE 9 42 101 -202 303 5000"):
+            with self.subTest(request=request):
+                actions = [(.8,tap(4)), (1.4,tap(5))]
+                if request in ("LEVEL","NORTH"):
+                    actions.append((2.0, tap(0) if request=="LEVEL" else tap(3)))
+                else:
+                    actions += [(1.9,[key(pygame.K_F2)]), (2.0,[pygame.event.Event(pygame.TEXTINPUT,text=request),key(pygame.K_RETURN)])]
+                actions += [(2.1,lambda port: port.axes.__setitem__(1,-.8)),
+                            (2.4,lambda port: port.axes.__setitem__(1,0)), (3.0,tap(0)), (3.8,tap(10))]
+                result,writes,session,auto,_,_=self.run_ui(actions,until=4.6)
+                self.assertEqual(result,0)
+                self.assertFalse(session.raw_mode)
+                self.assertTrue(any(2.1<=at<2.3 and data==b"STOP\n" for at,data in writes))
+                self.assertTrue(any(2.1<at<2.3 and data==b"JOG 0 585 0\n" for at,data in writes))
+                self.assertTrue(any(at>=3 and data==b"LEVEL\n" for at,data in writes))
+                self.assertTrue(any(at>=3.8 and data.startswith(b"KEYMOVE ") for at,data in writes))
+                self.assertEqual(len(auto.frames),2)
+                self.assertFalse(any(data==b"X\n" for _,data in writes))
+
+    def test_sensor_failure_completion_releases_manual_and_keyframes(self):
+        for request in (tap(0), tap(3)):
+            with self.subTest(request=request):
+                actions=[(.8,tap(4)),(1.4,tap(5)),(1.9,lambda port:setattr(port,"outcome","STOPPED")),
+                         (2.0,request), (2.8,lambda port:port.axes.__setitem__(1,-.8)),
+                         (3.0,lambda port:port.axes.__setitem__(1,0)),
+                         (3.4,lambda port:setattr(port,"outcome","PASS")), (3.6,tap(10))]
+                result,writes,_,auto,_,_=self.run_ui(actions,until=4.4)
+                self.assertEqual(result,0)
+                self.assertTrue(any(2.8<at<3 and data==b"JOG 0 585 0\n" for at,data in writes))
+                self.assertTrue(any(at>=3.6 and data.startswith(b"KEYMOVE ") for at,data in writes))
+                self.assertEqual(len(auto.frames),2)
+
+    def test_stop_and_abort_take_priority_over_alignment_buttons(self):
+        for safety in (key(pygame.K_SPACE),key(pygame.K_F12),button(1),key(pygame.K_x)):
+            with self.subTest(safety=safety):
+                _,writes,_,_,_,_=self.run_ui([(.8,tap(0)+tap(3)+[safety])])
+                self.assertFalse(any(data in (b"LEVEL\n",b"NORTH\n") for _,data in writes))
 
 
 if __name__ == "__main__":

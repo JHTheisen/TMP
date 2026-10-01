@@ -19,13 +19,19 @@ namespace simulated {
 enum class Drive { IDLE, FINITE, CONTINUOUS, BRAKING };
 struct PlantMotor {
     Drive drive = Drive::IDLE;
+    uint32_t runningVisibleAt = 0;
     double position = 0, velocity = 0, target = 0, degrees = 0;
     double degreesPerStep = 0.02;
-        int physicalSign = -1, direction = 1;
+    int physicalSign = -1, direction = 1;
+    // Keep continuous run*() and finite move() response independently
+    // configurable. Powered LEVEL evidence established these two production
+    // command paths separately; tests must not infer one from the other.
+    int continuousPhysicalMultiplier = 1, finitePhysicalMultiplier = 1;
+    int activePhysicalMultiplier = 1;
     double speed = 40;
     uint32_t stoppedAt = 0;
     int32_t acceleration = 240;
-    bool frozen = false, neverStops = false, needsStoppedSample = false;
+    bool frozen = false, neverStops = false, needsStoppedSample = false, idleForceStopLatched = false;
 };
 struct MoveCommand {
     uint8_t stepPin;
@@ -37,6 +43,7 @@ struct MoveCommand {
     bool continuous, wasBraking, beforeStoppedSample;
 };
 static uint32_t now = 0, lastSampleAt = 0;
+static uint32_t continuousStartDelayMs = 0;
 // Independent GPIO latch fixture: intentionally not derived from motor sign.
 static uint32_t gpioOutput = 0;
 static PlantMotor motors[3];
@@ -88,7 +95,8 @@ inline void integrate(PlantMotor &motor) {
         travel = remaining; motor.velocity = 0; stopped = true;
     }
     motor.position += travel;
-    if (!motor.frozen) motor.degrees += travel * motor.degreesPerStep * motor.physicalSign;
+    if (!motor.frozen) motor.degrees += travel * motor.degreesPerStep *
+        motor.physicalSign * motor.activePhysicalMultiplier;
     if (stopped && !motor.neverStops) {
         motor.drive = Drive::IDLE; motor.stoppedAt = now; motor.needsStoppedSample = true;
     }

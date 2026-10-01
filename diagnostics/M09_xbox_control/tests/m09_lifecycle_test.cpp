@@ -75,6 +75,14 @@ int main(int argc, char **argv) {
     if (scenario == "startup_bus_b_failure") simulated::busBInitFails = true;
     if (scenario == "startup_low_accuracy" || scenario == "north_qualification" || scenario == "pitch_mapping")
         simulated::accuracy = 1;
+    if (scenario == "startup_accuracy_recovery") {
+        simulated::accuracy = 0;
+        simulated::reinitAccuracy = 3;
+    }
+    if (scenario == "startup_accuracy_recovery_failure") {
+        simulated::accuracy = 0;
+        simulated::reinitInitFails = true;
+    }
     if (scenario == "startup_invalid") simulated::invalidQuaternion = true;
     if (scenario == "startup_stale") simulated::bnoPauseEnd = 100000;
     if (scenario == "encoders" || scenario == "encoder_failure") {
@@ -102,8 +110,12 @@ int main(int argc, char **argv) {
         CHECK(Serial.output.find("M09 READY") != std::string::npos);
         checkStopped();
         const bool validBno = scenario == "startup_valid" || scenario == "startup_bus_a_failure";
-        if (validBno) CHECK(pitchReady && referenceSet && northUsable);
-        else if (scenario == "startup_low_accuracy") CHECK(pitchReady && !referenceSet && !northUsable);
+        if (validBno) {
+            CHECK(pitchReady && referenceSet && northUsable);
+            CHECK(simulated::bnoBeginCalls == 1);
+            CHECK(Serial.output.find("BNO_TRACE kind=STARTUP_ACCURACY_STUCK") == std::string::npos);
+        } else if (scenario == "startup_low_accuracy" || scenario == "startup_accuracy_recovery" ||
+                   scenario == "startup_accuracy_recovery_failure") CHECK(pitchReady && !referenceSet && !northUsable);
         else CHECK(!pitchReady && !referenceSet && !northUsable);
         if (scenario == "startup_bus_a_failure") {
             CHECK(!encoders.state(0).busAvailable && encoders.state(1).busAvailable);
@@ -142,18 +154,50 @@ int main(int argc, char **argv) {
         } else {
             simulated::bnoResetAt = millis();
             advance(30);
-            CHECK(simulated::bnoResetDelivered && !pitchReady && !referenceSet && !northUsable);
+            CHECK(simulated::bnoResetDelivered && !pitchReady && !referenceSet);
+            // A fresh accepted post-reset sample can immediately restore direct
+            // NORTH readiness; the stable POSE reference still needs requalification.
+            CHECK(northUsable == northHeadingUsable(millis()));
         }
         CHECK(commandIdle() && manualReady() && simulated::commands.empty());
         advance(1800);
         CHECK(bnoValid && pitchReady && referenceSet && northUsable);
         CHECK(commandIdle() && manualReady() && simulated::commands.empty());
+    } else if (scenario == "startup_accuracy_recovery") {
+        advance(600);
+        line("JOG 250 250 250");
+        CHECK(manualActive && yawMotor->isRunning() && pitchMotor->isRunning() && carriageMotor->isRunning());
+        advance(3200);
+        CHECK(simulated::bnoBeginCalls >= 2 && simulated::sh2CloseCalls == 1);
+        CHECK(manualActive && !commandWatchdog.tripped());
+        CHECK(Serial.output.find("BNO_TRACE kind=STARTUP_ACCURACY_STUCK") != std::string::npos);
+        CHECK(Serial.output.find("BNO_TRACE kind=REINIT_SUCCESS") != std::string::npos);
+        advance(400);
+        CHECK(bnoAccuracy == 3 && bnoValid && manualActive);
+        CHECK(Serial.output.find("BNO_TRACE kind=RECOVERY_SUCCESS") != std::string::npos);
+        line("STOP");
+        waitUntilIdle(1000);
+        CHECK(commandIdle() && manualReady());
+    } else if (scenario == "startup_accuracy_recovery_failure") {
+        advance(600);
+        line("JOG 250 250 250");
+        CHECK(manualActive && yawMotor->isRunning() && pitchMotor->isRunning() && carriageMotor->isRunning());
+        advance(3200);
+        CHECK(simulated::bnoBeginCalls == 2 && simulated::sh2CloseCalls == 1);
+        CHECK(manualActive && !commandWatchdog.tripped());
+        CHECK(Serial.output.find("BNO_TRACE kind=STARTUP_ACCURACY_STUCK") != std::string::npos);
+        CHECK(Serial.output.find("BNO_TRACE kind=REINIT_FAILURE") != std::string::npos);
+        advance(3500);
+        CHECK(simulated::bnoBeginCalls == 2 && manualActive && !commandWatchdog.tripped());
+        line("STOP");
+        waitUntilIdle(1000);
+        CHECK(commandIdle() && manualReady());
     } else if (scenario == "north_qualification") {
         advance(2200);
         CHECK(pitchReady && !referenceSet && !northUsable && bnoAccuracy == 1);
         simulated::accuracy = 2;
         advance(400);
-        CHECK(!referenceSet && !northUsable); // A new high-accuracy event alone is not a baseline.
+        CHECK(!referenceSet && northUsable); // Direct heading is usable; POSE baseline remains unqualified.
         advance(2100);
         CHECK(referenceSet && northUsable && bnoAccuracy == 2);
         simulated::accuracy = 0;

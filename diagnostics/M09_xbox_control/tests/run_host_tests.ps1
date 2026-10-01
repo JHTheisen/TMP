@@ -28,15 +28,15 @@ try {
     Build-Test 'm09_lifecycle_test.cpp' 'lifecycle'
     Run-Cases 'lifecycle' @('startup_valid','startup_missing_bno','startup_init_failure','startup_report_failure',
         'startup_bus_a_failure','startup_bus_b_failure','startup_low_accuracy','startup_invalid','startup_stale',
-        'encoders','encoder_failure','idle_recovery','reset_recovery','north_qualification','manual_without_sensors',
+        'encoders','encoder_failure','idle_recovery','reset_recovery','startup_accuracy_recovery','startup_accuracy_recovery_failure','north_qualification','manual_without_sensors',
         'angular_requires_bno','carriage_without_bno','carriage_overflow','missing_timing','pitch_mapping')
     Build-Test 'manual_integration_test.cpp' 'manual'
     Run-Cases 'manual' @('startup','admission','axes','rates','reverse','stop_without_bno','missing_bno','low_accuracy',
         'stale','invalid','wrong_report','reset','no_orientation_limits','frozen_feedback','host_loss','malformed_lease',
-        'late_packet','blocked_main','slow_encoders','braking_timeout','axis_rejected','unexpected_stop','long_manual',
+        'late_packet','blocked_main','slow_encoders','braking_timeout','axis_rejected','unexpected_stop','first_jog','idle_force_stop_recovery','long_manual',
         'abort','axis_init','speed_init')
     Build-Test 'manual_carriage_test.cpp' 'manual_carriage'
-    Run-Cases 'manual_carriage' @('protocol','axes','reverse','rates','unbounded','sensor_independent','host_loss','braking_timeout','axis_rejected')
+    Run-Cases 'manual_carriage' @('protocol','axes','reverse','rates','unbounded','sensor_independent','host_loss','braking_timeout','axis_rejected','delayed_start')
     Build-Test 'm08_pose_integration_test.cpp' 'pose_integration'
     Run-Cases 'pose_integration' @('coordinated','relative','pitch_low','pitch_carriage_low','no_op','invalid','stale',
         'blocked_bno','invalid_feedback','wrong_report','accuracy','reset','runaway','pitch_guard','no_progress','timeout','abort')
@@ -45,6 +45,16 @@ try {
         'velocity_receipt','observe_receipt','settle_receipt','sample_order','receipt_rollover','baseline_receipt')
     Build-Test 'pose_stop_test.cpp' 'pose_stop'
     Run-Cases 'pose_stop' @('angular','carriage','pending','repeat','timeout','stall','abort')
+    Build-Test 'orientation_commands_test.cpp' 'orientation_commands'
+    Run-Cases 'orientation_commands' @('level_zero','level_delayed_slew_start','level_tolerance','level_positive','level_negative',
+        'level_precision_negative','level_precision_positive','level_boundary_precision_negative','level_boundary_precision_positive',
+        'level_boundary_slew_negative','level_boundary_slew_positive','level_eighty','level_high_reduction',
+        'north_zero','north_tolerance','north_positive','north_negative','north_359','north_1','north_180','north_219','north_large_success','north_travel_accept','north_219_guard','north_projected_limit_guard',
+        'level_low_quality','north_low_quality','level_transient','north_transient','level_reset','north_reset',
+        'level_stale','north_stale','level_invalid','north_invalid','level_stop','north_stop',
+        'north_stop_only','level_stall_stop','north_stall_stop','level_abort','north_abort','north_wrong_direction','north_braking_rebound','north_precision_noise','level_wrong_direction','level_no_progress',
+        'missing','handoffs','admission','level_guard','invalid_admission','north_usability',
+        'manual_handoff','level_manual_first_yaw','pending_stop','level_forced','north_forced','level_pause_stop','north_pause_stop')
     Build-Test 'keyframe_math_test.cpp' 'keyframe_math'
     & '.pio/host_tests/keyframe_math.exe'
     if ($LASTEXITCODE -ne 0) { throw 'Keyframe timing math failed' }

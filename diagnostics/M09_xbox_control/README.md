@@ -70,9 +70,10 @@ can affect both sensors without making raw manual velocity depend on them.
 
 ## Xbox behavior and protocol
 
-- Right stick horizontal = yaw (raw axis 2).
+- Left stick horizontal = yaw (raw axis 0).
 - Left stick vertical = pitch (raw axis 1); up requests positive physical pitch.
-- Left stick horizontal = carriage (raw axis 0). Use `--invert-carriage` to reverse it.
+- Right stick horizontal = carriage (raw axis 2), with the inversion already set
+  by `7e144b0`. The legacy `--invert-carriage` flag does not change that setting.
 - The existing 15% deadband and quadratic velocity curve are unchanged.
 - The user's current default scale is **1.0**: full stick requests yaw 2000,
   pitch 2400 and carriage 2000 pulses/s. `--speed-scale 0.25` selects one quarter
@@ -82,7 +83,7 @@ can affect both sensors without making raw manual velocity depend on them.
   block that handshake.
 - Release an individual stick axis to brake that motor. Reversal retains motor
   acceleration and the existing 100 ms stopped observation.
-- A/Space/F12 sends STOP; center sticks again for 0.5 s before manual resumes. keyboard X/controller B deliberately
+- Space/F12 sends STOP; center sticks again for 0.5 s before manual resumes. A requests LEVEL. Keyboard X/controller B deliberately
   sends the existing latched abort; resetting is required after explicit abort.
 
 | Command | Behavior |
@@ -95,6 +96,7 @@ can affect both sensors without making raw manual velocity depend on them.
 | `X` / `x` | Immediate existing latched abort, including within a partial line |
 | `MOVE 0 0 steps` | Finite relative carriage motion, independent of BNO/north |
 | `POSE yaw pitch steps` / other `MOVE` | BNO-based angular positioning requirements below |
+| `LEVEL` / `NORTH` | Explicit pitch-level / magnetic-heading-zero operation; no arguments |
 
 Manual control works with missing, stale, invalid or low-accuracy BNO information
 and failed encoders. Manual BNO direction/progress, angular position/margin and
@@ -120,21 +122,23 @@ requires rearming before sending nonzero input again.
 
 Manual is the default workflow. Center both sticks for 0.5 seconds; the host
 performs the existing zero-JOG/acknowledgment handshake automatically. There is
-no AUTO toggle and Y is unassigned. The stick mapping, deadband, quadratic curve,
+no AUTO toggle. A requests LEVEL and Y requests NORTH. The stick mapping, deadband, quadratic curve,
 watchdog, F2 raw editor and F3 display freeze remain in use.
 
 | Control | Action |
 | --- | --- |
-| Left stick vertical / horizontal | Manual pitch / carriage |
-| Right stick horizontal | Manual yaw |
+| Left stick vertical / horizontal | Manual pitch / yaw |
+| Right stick horizontal | Manual carriage |
 | D-pad up/down | `MOVE 0 +/-increment 0` (physical pitch degrees) |
 | D-pad right/left | `MOVE +/-increment 0 0` (reported BNO heading degrees) |
+| A (0) | LEVEL: physical pitch zero |
+| Y (3) | NORTH: reported magnetic yaw zero |
 | Right-stick click (9) | Select 1 or 2 degree increments; initial 1 |
 | LB (4) / RB (5) | Stop, then capture A / B from a fresh firmware snapshot |
 | Controller X (2) | Cycle duration 10 -> 20 -> 5 seconds; initial 10 |
 | Left-stick click (8) | Travel to A at normal generated-step travel speed |
 | Center/Home (10) | Return to A if necessary, then run the full timed A to B |
-| A (0) / Space / F12 | STOP; center sticks again before normal manual resumes |
+| Space / F12 | STOP; center sticks again before normal manual resumes |
 | B (1) / keyboard X | Latched abort and exit; firmware reset required |
 | Esc / close | STOP and exit |
 
@@ -146,7 +150,9 @@ confidence clears captures. They remain in memory only; no persistence is added.
 
 Center sticks before requesting automatic movement. One press initiates one
 sequence; release buttons/neutralize the hat for another. Busy movement presses
-and hat diagonals are discarded. No JOG is sent during an automatic sequence.
+are discarded. D-pad diagonals have no action; the four cardinal directions retain
+their relative MOVE assignments.
+No JOG is sent during an automatic sequence.
 Deliberate stick displacement outside the existing deadband cancels the sequence,
 sends STOP, waits for stopped READY and the zero-JOG acknowledgment, then applies
 the current live stick value without requiring centering or a mode change.
@@ -164,13 +170,15 @@ If already at A, the initial stopped snapshot is sufficient to start A to B.
 
 The live MANUAL + KEYFRAMES panel shows action phase, duration, increments and
 captures even with F3 frozen. F2 retains exclusive raw-command entry; keyframe
-buttons and joystick takeover are inactive in the editor. Exiting F2 sends STOP
+buttons are inactive in the editor. Deliberate sticks during a submitted autonomous
+motion leave the editor and use the same manual takeover. Exiting F2 sends STOP
 and requires centered sticks for 0.5 seconds before normal manual operation.
 After a communication fault, STOP provides deliberate recovery; actions do not retry.
 
-Default buttons: A=0, B=1, X=2, LB=4, RB=5, LS click=8, RS click=9, Home=10;
+Default buttons: A=0, B=1, X=2, Y=3, LB=4, RB=5, LS click=8, RS click=9, Home=10;
 D-pad is hat 0. `--capture-a-button`, `--capture-b-button`, `--duration-button`,
-`--play-button`, `--return-a-button`, `--increment-button` and `--move-hat` remain
+`--play-button`, `--return-a-button`, `--increment-button`, `--level-button`,
+`--north-button` and `--move-hat` remain
 configurable. `--auto-button` was removed along with the mode toggle. Dry-run
 opens no serial and cannot capture real keyframes.
 
@@ -239,7 +247,7 @@ link cannot guarantee delivery; the 250 ms manual JOG lease is not a KEYMOVE lea
 First supervised validation after a separately authorized upload:
 1. Run host `--dry-run` to check buttons and the new default workflow.
 2. Start powered testing at reduced manual `--speed-scale`, verify axes/signs,
-   A/Space/F12 STOP and latched abort/reset with ample physical clearance.
+   Space/F12 STOP and latched abort/reset with ample physical clearance.
 3. Position and press LB; make small visible manual changes, then press RB.
 4. Select a feasible duration, move away from A, center sticks and press Home.
    Verify return to A completes before the full timed A to B starts.
@@ -280,8 +288,11 @@ or automatic test commands. Whitespace-only input is rejected locally; otherwise
 the firmware decides command syntax and admission. Each submission sends exactly
 the entered single line plus a newline, with no automatic retry.
 
-Raw mode remains active after submission, rejection, completion and STOP. Moving
-sticks does not send JOG. **Space, Xbox A or F12** sends STOP; **X or Xbox B** keeps
+Raw mode remains active after rejection, completion and STOP while sticks remain
+centered. Deliberate stick motion during an outstanding raw POSE, MOVE, LEVEL,
+NORTH or keyframe motion cancels it, leaves the editor, waits for stopped READY,
+then performs the existing zero-JOG handshake and honors current manual input.
+Idle command editing never generates JOG. **Space or F12** sends STOP; **X or Xbox B** keeps
 the existing latched-abort-and-exit behavior. **Esc/close** sends STOP and exits.
 Focus loss also requests STOP. These safety actions take priority over an Enter
 queued in the same input batch. Command text is accepted only in the explicit
@@ -290,7 +301,7 @@ focused editor; Xbox buttons are never text.
 Press **F2 again** to leave the editor; this also sends STOP and leaves manual
 control disarmed. Wait for READY and center sticks for 0.5 seconds; the host then
 performs the existing manual arming handshake. Manual traffic never
-resumes automatically after POSE.
+resumes automatically from raw completion without deliberate manual intervention.
 
 The persistent diagnostics show heading, `physical_pitch` (with its declared
 axis), `north_usable`, BNO accuracy, and **Current carriage_steps**. Carriage is
@@ -314,6 +325,90 @@ are not streamed; the firmware's manual lease still applies.
 This host feature does not update the ESP32. Before powered POSE testing, verify
 the board has the restored POSE firmware, including ordinary STOP support.
 
+## LEVEL and magnetic NORTH from the controller
+
+From ordinary manual operation, center sticks and press **A (0) for LEVEL** or
+**Y (3) for NORTH**. These are single requests, not operator modes. Firmware safely
+brakes an active manual session before starting the requested alignment. Holding a
+control cannot repeat it, and busy presses are not queued.
+The same firmware commands `LEVEL` and `NORTH` are available for diagnostics.
+
+LEVEL drives only the physical pitch motor, using the powered-test mounting's
+**BNO Euler PITCH**, with target zero and error `0 - physical_pitch`. Separate roll
+does not command pitch. Powered tests established the two LEVEL command paths
+independently: continuous `runForward()` uses the LEVEL-specific `+1` BNO-response
+sign, while finite precision `move()` retains the physically verified legacy
+pitch correction sign `-1`. Manual pitch and existing POSE/MOVE remain unchanged.
+NORTH drives only yaw toward zero of the existing
+`SH2_ROTATION_VECTOR` magnetic heading: `shortestDifference(0, heading)` selects
+the continuous target (359 gives +1 degree, 1 gives -1, a 180-degree tie gives -180).
+There is no declination or true-north conversion. Unrequested axes remain stopped.
+Both reuse the existing POSE slew, finite corrections, braking, direction/progress
+checks and post-stop settling, with **0.4-degree tolerance** and verified signs.
+
+Slew uses the fastest existing per-axis travel configuration: **yaw 2000 steps/s,
+2000 steps/s^2; pitch 2400 steps/s, 2400 steps/s^2**. There is no extra derating.
+Near target, the existing precision controller reduces burst size and speed
+(40-1000 steps/s, acceleration 250), brakes and observes before correcting again.
+The existing 100 ms stopped observation and one-second, 30-sample final settling
+verification remain; admission and transient recovery do not require 30 samples.
+LEVEL may start near the physically observed -79 degrees. Its pitch-only admission
+and runtime domain guard is +/-89 degrees, one degree inside the BNO Euler-pitch
+singularity; the generic POSE +/-75-degree pitch guard is not applied to LEVEL.
+NORTH retains the +/-185-degree generated-position/cable travel guard around the
+qualified north target (or pitch-ready startup reference before qualification).
+Rejections report current and target offsets, shortest heading error, and the limit.
+Direction/progress detection,
+deadlines, bounded rates, braking, stale-feedback handling and normal POSE/MOVE
+caps and semantics are unchanged.
+
+M09 does **not** configure a fixed mechanical steps/degree or driver microstep
+setting. Its `PITCH_PULSES_PER_ERROR_DEG=24` and yaw value `16` are correction gains,
+not gear ratios. Completed BNO motion supplies learned timing conversions; these
+start unknown. Alignment also measures motor pulses/output degree during motion
+after at least 0.3 degrees of response and eight pulses. This includes the real
+pitch reduction and microstepping without assuming they match an old setup.
+Historical pitch diagnostics record 200 full steps, 8x microstepping and about
+15:1 reduction: nominal `1600 * 15 / 360 = 66.667` pulses/output degree, conditional
+on the same driver setting. The earlier powered POSE result was about 71.866.
+Neither number is imposed on the new controller. No fixed yaw conversion exists
+in this baseline. At nominal pitch conversion, 2400 steps/s corresponds to about
+36 output degrees/s; actual response, acceleration and braking determine motion.
+
+The operation deadline uses requested angle times measured pulses/degree, the
+selected axis speed/acceleration, the existing finite-correction tail, and settling:
+twice that predicted time plus ten seconds and recovery pauses. Unknown response
+gets the existing 90-second bootstrap allowance, replaced once measured; later
+estimates can extend it. Progress is independently checked: the existing 2-second
+slew / 15-second precision bounds can grow to three predicted 0.15-degree progress
+intervals plus one second for a slower measured drivetrain. Frozen or wrong-way
+feedback still stops the operation. The host follows published firmware deadlines
+and retains its existing three-second communication-loss guard.
+
+LEVEL requires fresh, accepted rotation-vector orientation and a working feedback
+watchdog, but does not impose a magnetic-accuracy threshold. NORTH additionally
+requires a finite heading and rotation-vector accuracy >=2; it does not wait for
+the separate idle one-second POSE reference window. `BNO_STATE north_reason=...`
+reports the exact current NORTH gate. Missing BNO rejects locally. For these
+commands only, foreground feedback age of 130 ms starts
+controlled braking, ahead of the unchanged independent 150 ms forced-stop watchdog.
+Invalid/reset feedback also pauses. The grace period is **1500 ms from the pause**.
+Fresh valid feedback received after the motor stops plus its 100 ms observation
+allows the same operation to resume, with target/error reevaluated. No fresh
+post-stop feedback by grace expiry means clean cancellation and READY, not a
+latched sensor fault. Ordinary controlled braking preserves A/B; an actual forced
+watchdog stop retains the established coordinate-confidence invalidation.
+
+Manual input always has priority during LEVEL, NORTH, POSE/MOVE and playback.
+The existing STOP, stopped-READY, zero-JOG acknowledgment sequence performs the
+handoff; live stick input then takes effect without recentering, a toggle, F2 or
+restart. Explicit Space/F12 STOP and B/keyboard-X latched abort remain unchanged.
+Success and recoverable failure leave normal manual/keyframe actions available.
+No sensor-worker, keyframe motion or command-watchdog code was changed. The manual
+engine's rates, directions and watchdog behavior are unchanged; its stopped-session
+completion can now start a pending LEVEL/NORTH request. Ordinary motion and startup
+remain independent of optional BNO data.
+
 ## BNO-based POSE remains a separate capability
 
 The angular controller uses BNO heading and **Euler PITCH**, with existing motor
@@ -321,7 +416,8 @@ signs, target domain, braking and precision correction. It still
 requires fresh plausible orientation and a working feedback watchdog. Low accuracy,
 missing qualification and an unlearned pitch baseline alone no longer reject yaw
 or pitch movement. Heading means the sensor's reported heading, not verified true
-north; `north_usable` continues to report magnetic qualification separately.
+north; `north_usable` reports whether current fresh accepted heading data and
+accuracy >=2 can admit NORTH, separately from the stable POSE reference.
 Loss of essential feedback cancels that operation and returns manual availability.
 Encoder acquisition does not replace this feedback or invent a gearbox calibration.
 
@@ -447,7 +543,7 @@ After **you** flash this build, perform this short pitch-only test:
    up 0.5 s, directly down 1 s, then center 1 s. Expect `BRAKE_REVERSE`, `STOPPED`,
    then the opposite `RUN`/`DIR_CHECK`. Braking retains the previous direction
    until stopped. If it continues the wrong physical way, stop the test.
-6. Press Space/A to STOP/disarm, close normally, and retain the session log plus
+6. Press Space to STOP/disarm, close normally, and retain the session log plus
    your observed directions. Verify yaw/carriage commands remained zero.
 
 If latch readings change correctly but the shaft still turns one way, the next

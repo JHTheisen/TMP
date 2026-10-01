@@ -2,11 +2,16 @@
 #include <Wire.h>
 constexpr uint8_t SH2_ROTATION_VECTOR = 5;
 constexpr int SH2_ERR_IO = -4;
-namespace simulated { static unsigned productQueries = 0; static int productQueryResult = 0; }
+namespace simulated {
+static unsigned productQueries = 0, bnoBeginCalls = 0, sh2CloseCalls = 0;
+static int productQueryResult = 0, reinitAccuracy = -1;
+static bool reinitInitFails = false;
+}
 extern "C" inline int m09_sh2_request_product_id() {
     ++simulated::productQueries;
     return simulated::productQueryResult;
 }
+inline void sh2_close() { ++simulated::sh2CloseCalls; }
 struct sh2_Hal_t { int (*write)(sh2_Hal_t *, uint8_t *, unsigned); };
 struct sh2_RotationVectorWAcc_t { float real, i, j, k, accuracy; };
 struct sh2_SensorValue_t {
@@ -23,10 +28,13 @@ public:
     TwoWire *wire = nullptr;
     bool begin_I2C(uint8_t selectedAddress, TwoWire *selectedWire)
     {
+        ++simulated::bnoBeginCalls;
         address = selectedAddress;
         wire = selectedWire;
         _HAL.write = simulatedWrite;
-        return !simulated::bnoInitFails && _init(0);
+        if (simulated::bnoBeginCalls > 1 && simulated::reinitAccuracy >= 0)
+            simulated::accuracy = static_cast<uint8_t>(simulated::reinitAccuracy);
+        return !simulated::bnoInitFails && !(simulated::reinitInitFails && simulated::bnoBeginCalls > 1) && _init(0);
     }
     bool enableReport(uint8_t, uint32_t intervalUs)
     {

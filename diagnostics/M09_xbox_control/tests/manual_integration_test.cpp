@@ -59,7 +59,22 @@ int main(int argc, char **argv) {
     CHECK(yawMotor->stepPin == 33 && yawMotor->directionPin == 32);
     CHECK(pitchMotor->stepPin == 12 && pitchMotor->directionPin == 26);
     CHECK(carriageMotor->stepPin == 22 && carriageMotor->directionPin == 21);
-    if (scenario == "startup") {
+    if (scenario == "first_jog") {
+        arm();
+        simulated::continuousStartDelayMs = 250;
+        stream(200, 200, 300);
+        CHECK(manualActive && yawMotor->isRunning() && pitchMotor->isRunning() && !carriageMotor->isRunning());
+        CHECK(Serial.output.find("YAW continuous motor stopped unexpectedly") == std::string::npos);
+        CHECK(Serial.output.find("PITCH continuous motor stopped unexpectedly") == std::string::npos);
+        simulated::continuousStartDelayMs = 0;
+        stop();
+    } else if (scenario == "idle_force_stop_recovery") {
+        stopMotors();
+        arm(); stream(200, 200, 300);
+        CHECK(manualActive && yawMotor->isRunning() && pitchMotor->isRunning());
+        CHECK(Serial.output.find("continuous motor stopped unexpectedly") == std::string::npos);
+        stop();
+    } else if (scenario == "startup") {
         advance(6000); readyStopped(); CHECK(simulated::commands.empty());
     } else if (scenario == "admission") {
         for (const auto *bad : {"JOG 1 0", "JOG nan 0", "JOG inf 0", "JOG 1001 0", "JOG 0.5 0",

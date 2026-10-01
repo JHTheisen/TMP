@@ -122,6 +122,84 @@ class AutoControlTests(unittest.TestCase):
         self.auto.receive("M09 READY", .7)
         self.assertIsNone(self.auto.frame(.8))
 
+    def test_successful_positioning_matches_keyframe_manual_ready_state(self):
+        def manual_reentry():
+            manual = ManualSession()
+            manual.receive("M09 READY", 1.4)
+            self.assertTrue(manual.arm(1.9, True))
+            handshake = manual.frame(1.92, 250, 0, 0)
+            manual.receive("MANUAL READY: test", 1.94)
+            live = manual.frame(1.96, 250, 0, 0)
+            return manual.state, handshake, live
+
+        keyframe = AutoSession()
+        keyframe.enter(0)
+        keyframe.receive("M09 READY", .1)
+        keyframe.action = "raw"
+        keyframe.phase = "KEYMOVE_ACTIVE"
+        keyframe.pending_id = 1
+        keyframe.receive("KEYMOVE RESULT id=1 status=PASS", 1.3)
+        keyframe.receive("M09 READY", 1.4)
+        expected = (keyframe.phase, keyframe.busy)
+        expected_manual = manual_reentry()
+
+        for command, accepted, result in (
+                ("POSE", "POSE ACCEPTED yaw_deg=1", "FINAL RESULT: PASS"),
+                ("LEVEL", "LEVEL ACCEPTED error_deg=-20.0", "LEVEL RESULT: PASS"),
+                ("NORTH", "NORTH ACCEPTED error_deg=20.0", "NORTH RESULT: PASS")):
+            with self.subTest(command=command):
+                auto = AutoSession()
+                auto.enter(0)
+                auto.receive("M09 READY", .1)
+                if command == "POSE":
+                    auto.raw_sent(command, .2)
+                else:
+                    self.assertEqual(auto.request(command.lower(), .2, True), b"STOP\n")
+                    auto.receive("M09 READY", .25)
+                    self.assertEqual(auto.frame(.3), (command + "\n").encode())
+                auto.receive(accepted, .3)
+                auto.receive(result, 1.3)
+                auto.receive("M09 READY", 1.4)
+                self.assertEqual((auto.phase, auto.busy), expected)
+                self.assertIsNone(auto.frame(1.5))
+                self.assertEqual(manual_reentry(), expected_manual)
+
+    def test_active_positioning_remains_overridable_for_joystick_takeover(self):
+        for command, accepted in (
+                ("POSE", "POSE ACCEPTED yaw_deg=1"),
+                ("LEVEL", "LEVEL ACCEPTED error_deg=-20.0"),
+                ("NORTH", "NORTH ACCEPTED error_deg=20.0")):
+            with self.subTest(command=command):
+                auto = AutoSession()
+                auto.enter(0)
+                auto.receive("M09 READY", .1)
+                if command == "POSE":
+                    auto.raw_sent(command, .2)
+                else:
+                    auto.request(command.lower(), .2, True)
+                auto.receive(accepted, .3)
+                self.assertTrue(auto.overridable)
+                auto.cancel(.4, "Joystick takeover")
+                self.assertEqual(auto.phase, "STOPPING")
+
+    def test_interrupted_positioning_does_not_enable_automatic_manual_takeover(self):
+        for command, accepted, result in (
+                ("POSE", "POSE ACCEPTED yaw_deg=1", "FINAL RESULT: STOPPED"),
+                ("LEVEL", "LEVEL ACCEPTED error_deg=-20.0", "LEVEL RESULT: STOPPED"),
+                ("NORTH", "NORTH ACCEPTED error_deg=20.0", "NORTH RESULT: STOPPED")):
+            with self.subTest(command=command):
+                auto = AutoSession()
+                auto.enter(0)
+                auto.receive("M09 READY", .1)
+                if command == "POSE":
+                    auto.raw_sent(command, .2)
+                else:
+                    auto.request(command.lower(), .2, True)
+                auto.receive(accepted, .3)
+                auto.receive(result, 1.3)
+                auto.receive("M09 READY", 1.4)
+                self.assertEqual((auto.phase, auto.busy), ("READY", False))
+
     def test_all_dpad_signs_leave_carriage_unchanged(self):
         for action, command in (("pitch_up", b"MOVE 0 2 0\n"), ("pitch_down", b"MOVE 0 -2 0\n"),
                                 ("yaw_right", b"MOVE 2 0 0\n"), ("yaw_left", b"MOVE -2 0 0\n")):
@@ -229,6 +307,53 @@ class AutoControlTests(unittest.TestCase):
             arguments(["--capture-a-button", "0"])
         with self.assertRaises(SystemExit):
             arguments(["--capture-a-button", "5"])
+        self.assertEqual((defaults.level_button, defaults.north_button), (0, 3))
+        with self.assertRaises(SystemExit):
+            arguments(["--level-button", "2"])
+        with self.assertRaises(SystemExit):
+            arguments(["--north-button", "1"])
+
+    def test_alignment_uses_shared_stop_handoff_and_dynamic_firmware_deadline(self):
+        for name in ("LEVEL", "NORTH"):
+            with self.subTest(name=name):
+                self.setUp()
+                self.capture("A")
+                self.assertEqual(self.request(name.lower(),1,True),(name+"\n").encode())
+                self.auto.receive(name+" ACCEPTED deadline_ms=90000",1.1)
+                self.assertTrue(self.auto.overridable)
+                self.auto.receive(name+" DEADLINE deadline_ms=200000",2)
+                self.assertAlmostEqual(self.auto.deadline,206.1) # Relative to admission, not update receipt.
+                self.auto.receive(name+" PAUSED: BNO stale; recovery grace_ms=1500",100)
+                self.assertIsNone(self.auto.frame(100.1))
+                self.auto.receive(name+" RESUMED deadline_ms=201100",101.1)
+                self.assertAlmostEqual(self.auto.deadline,207.2)
+                self.auto.receive(name+" RESULT: PASS",102)
+                self.auto.receive("M09 READY",102.01)
+                self.assertFalse(self.auto.busy)
+                self.assertIn("A",self.auto.frames)
+                self.assertEqual(self.request("capture_b",103,False),b"SNAP 3\n")
+
+    def test_alignment_rejection_and_failure_are_recoverable(self):
+        for terminal in ("REJECTED: BNO unavailable", "RESULT: STOPPED"):
+            for name in ("LEVEL","NORTH"):
+                self.setUp()
+                self.capture("A")
+                self.request(name.lower(),1,True)
+                self.auto.receive(name+" "+terminal,1.1)
+                self.auto.receive("M09 READY",1.2)
+                self.assertFalse(self.auto.busy)
+                self.assertIn("A",self.auto.frames)
+                self.assertEqual(self.request("pitch_up",2,True),b"MOVE 0 1 0\n")
+
+    def test_alignment_watchdog_epoch_loss_clears_frames_without_canceling_recovery(self):
+        self.capture("A")
+        self.request("level",1,True)
+        self.auto.receive("LEVEL ACCEPTED deadline_ms=90000",1.1)
+        self.auto.receive("KEYFRAME_INVALIDATED epoch=43 reason=forced_stop",1.2)
+        self.assertFalse(self.auto.frames)
+        self.assertEqual(self.auto.phase,"MOVE_ACTIVE")
+        self.auto.receive("LEVEL RESUMED deadline_ms=91000",2)
+        self.assertIsNone(self.auto.frame(2.1))
 
 
 if __name__ == "__main__":

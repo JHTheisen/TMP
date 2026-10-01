@@ -81,6 +81,9 @@ public:
     void onInitResponse(uint32_t transportUs) { trace("UNSOLICITED_INIT", transportUs, 0); }
 
 private:
+    static constexpr uint32_t STARTUP_ACCURACY_RETRY_MS = milestone4::BNO_PERSISTENT_AFTER_MS;
+    static constexpr uint32_t RECOVERY_ACCURACY_TIMEOUT_MS = 3000;
+    static constexpr uint8_t RECOVERY_MIN_ACCURACY = 2;
     // These devices and every SH-2 call have exactly one owner, including setup,
     // report recovery, product queries, and both AS5600 bus transactions.
     milestone4::DiagnosticBno085 bno_;
@@ -90,6 +93,9 @@ private:
     BnoDiagnostics raw_;
     sh2_SensorValue_t event_{}; // library callback pointer remains valid between calls
     uint32_t lastReportAttempt_ = 0, consumedEpoch_ = 0;
+    uint32_t startupReportAt_ = 0, recoveryStartedAt_ = 0;
+    bool startupAccuracyMonitoring_ = false, startupRecoveryAttempted_ = false;
+    bool startupRecoveryPending_ = false;
 #ifdef M07_HOST_TEST
     bool started_ = false, inFlight_ = false;
 #endif
@@ -123,6 +129,71 @@ private:
         if (!state_.reportEnabled) ++state_.reportFailures;
         trace("REPORT_ENABLE", micros(), 0, SH2_ROTATION_VECTOR, milestone4::BNO_REPORT_INTERVAL_US, 0, state_.reportEnabled);
     }
+    bool beginBnoSession() {
+        state_.bnoInitialized = bno_.begin_I2C(0x4A, &Wire1);
+        if (state_.io.productGeneration == state_.io.resetEvents)
+            state_.io.queriedGeneration = state_.io.resetEvents;
+        if (state_.bnoInitialized) enableReport();
+        return state_.bnoInitialized && state_.reportEnabled;
+    }
+    void beginStartupAccuracyMonitor() {
+        startupReportAt_ = millis();
+        startupAccuracyMonitoring_ = true;
+        startupRecoveryPending_ = false;
+        trace("STARTUP_REPORT_READY", micros(), 0, state_.reportEnabled,
+              milestone4::BNO_REPORT_INTERVAL_US, 0, state_.reportEnabled);
+    }
+    bool reinitializeBno() {
+        trace("REINIT_BEGIN", micros(), 0, startupRecoveryAttempted_,
+              raw_.rotations, millis() - startupReportAt_);
+        // Invalidate queued samples before replacing the SH-2 session. This is
+        // the same epoch boundary used for an unsolicited sensor reset.
+        resetEpoch.fetch_add(1, std::memory_order_release);
+        state_.bnoInitialized = false;
+        state_.reportEnabled = false;
+        publish();
+        sh2_close();
+        raw_ = BnoDiagnostics{};
+        const bool ready = beginBnoSession();
+        if (!ready) {
+            trace("REINIT_FAILURE", micros(), 0, state_.bnoInitialized,
+                  state_.reportEnabled, 0, 0);
+            return false;
+        }
+        recoveryStartedAt_ = millis();
+        startupRecoveryPending_ = true;
+        trace("REINIT_SUCCESS", micros(), 0, state_.bnoInitialized,
+              state_.reportEnabled, 0, 1);
+        return true;
+    }
+    bool observeStartupAccuracy(const sh2_SensorValue_t &event, uint32_t now) {
+        if (event.sensorId != SH2_ROTATION_VECTOR || !raw_.plausible) return false;
+        if (startupRecoveryPending_) {
+            if (event.status >= RECOVERY_MIN_ACCURACY) {
+                startupRecoveryPending_ = false;
+                trace("RECOVERY_SUCCESS", micros(), 0, event.status,
+                      raw_.rotations, now - recoveryStartedAt_, 1);
+            } else if (now - recoveryStartedAt_ >= RECOVERY_ACCURACY_TIMEOUT_MS) {
+                startupRecoveryPending_ = false;
+                trace("RECOVERY_FAILURE", micros(), 0, event.status,
+                      raw_.rotations, now - recoveryStartedAt_, 0);
+            }
+            return false;
+        }
+        if (!startupAccuracyMonitoring_) return false;
+        if (event.status != 0) {
+            startupAccuracyMonitoring_ = false;
+            trace("STARTUP_ACCURACY_OK", micros(), 0, event.status,
+                  raw_.rotations, now - startupReportAt_, 1);
+            return false;
+        }
+        if (now - startupReportAt_ < STARTUP_ACCURACY_RETRY_MS) return false;
+        startupAccuracyMonitoring_ = false;
+        startupRecoveryAttempted_ = true;
+        trace("STARTUP_ACCURACY_STUCK", micros(), 0, event.status,
+              raw_.rotations, now - startupReportAt_, 0);
+        return reinitializeBno();
+    }
     bool handleReset() {
         if (!bno_.wasReset()) return false;
         ++state_.consumedResets;
@@ -144,10 +215,7 @@ private:
         if (b) {
             Wire1.beginTransmission(0x4A);
             if (Wire1.endTransmission() == 0) {
-                state_.bnoInitialized = bno_.begin_I2C(0x4A, &Wire1);
-                if (state_.io.productGeneration == state_.io.resetEvents)
-                    state_.io.queriedGeneration = state_.io.resetEvents;
-                if (state_.bnoInitialized) enableReport();
+                if (beginBnoSession()) beginStartupAccuracyMonitor();
             }
         }
         state_.setupDone = true;
@@ -190,8 +258,9 @@ private:
                 if (event_.sensorId == SH2_ROTATION_VECTOR && !raw_.plausible)
                     trace("MALFORMED_RV", start, elapsed, event_.sequence, event_.status);
             }
+            const bool reinitialized = got && observeStartupAccuracy(event_, receivedMs);
             const bool reset = handleReset();
-            if (got && !reset && state_.reportEnabled) {
+            if (got && !reset && !reinitialized && state_.reportEnabled) {
                 SensorSample sample; sample.event=event_; sample.receivedMs=receivedMs;
                 sample.epoch=resetEpoch.load(std::memory_order_acquire);
                 if (!samples.push(sample)) ++state_.sampleDrops;

@@ -1,6 +1,5 @@
 // Included inside main.cpp's private namespace. Manual rates retain the motor
 // engine, signs and acceleration; optional orientation is not a motion gate.
-#include "pitch_direction_diagnostics.h"
 void rejectManual(const char *reason) {
     queueText("MANUAL REJECTED: "); queueText(reason); queueText("\n");
 }
@@ -26,6 +25,7 @@ void completeManualSession(const char *reason) {
     manualActive = manualEnding = poseActive = carriagePending = false;
     finalPrinted = true; phase = Phase::COMPLETE;
     queueText("MANUAL STOPPED: "); queueText(reason); queueText("; rearm centered\n");
+    if (startPendingOrientation()) return;
     queueText(manualReady() ? "M09 READY\n" : "M09 BUSY\n");
 }
 void stopManualSession(const char *reason) {
@@ -58,6 +58,7 @@ bool executeManualCommand(char **tokens, unsigned count) {
         return true;
     }
     if (strcmp(tokens[0], "STOP") == 0 && count == 1) {
+        cancelPendingOrientation();
         if (manualActive) {
             safety(); if (finalPrinted) return true;
             manualEnding = true;
@@ -99,7 +100,7 @@ bool executeManualCommand(char **tokens, unsigned count) {
 }
 void failManualAxis(FastAccelStepper *motor, ManualAxis &manual, const char *name, const char *reason) {
     invalidateKeyframes(reason);
-    motor->forceStop();
+    if (motor->isRunning()) motor->forceStop();
     if (motor == pitchMotor) {
         pitchDirectionDiagnostics.checkPending = false;
         tracePitchDirection("FORCE_STOP");
@@ -117,7 +118,7 @@ bool serviceManualBraking(FastAccelStepper *motor, ManualAxis &manual, int reque
                 failManualAxis(motor, manual, name, "braking timeout; axis stopped");
             return true;
         }
-        manual.braking = false; manual.direction = 0; manual.rate = 0;
+        manual.braking = false; manual.direction = 0; manual.rate = 0; manual.runningObserved = false;
         manual.observing = true; manual.stoppedAt = now;
         if (motor == pitchMotor) tracePitchDirection("STOPPED");
         return true;
@@ -134,7 +135,11 @@ bool serviceManualBraking(FastAccelStepper *motor, ManualAxis &manual, int reque
         }
         return true;
     }
-    if (manual.direction && !motor->isRunning()) {
+    const bool running = motor->isRunning();
+    if (running) manual.runningObserved = true;
+    if (manual.direction && !running) {
+        if (!manual.runningObserved) return true;
+        if (now - manual.startedAt < PRECISION_OBSERVE_MS) return true;
         failManualAxis(motor, manual, name, "continuous motor stopped unexpectedly"); return true;
     }
     return false;
@@ -158,6 +163,8 @@ void serviceManualAxis(Axis &axis, ManualAxis &manual, uint32_t now) {
                 failManualAxis(axis.motor, manual, name, "FastAccelStepper motion rejected"); return;
             }
             manual.direction = requestedDirection;
+            manual.startedAt = now;
+            manual.runningObserved = false;
             if (axis.pitch) {
                 pitchDirectionDiagnostics.checkAt = millis();
                 pitchDirectionDiagnostics.checkPending = true;
@@ -184,6 +191,8 @@ void serviceManualCarriage(uint32_t now) {
                 failManualAxis(carriageMotor, manual, "CARRIAGE", "FastAccelStepper motion rejected"); return;
             }
             manual.direction = direction;
+            manual.startedAt = now;
+            manual.runningObserved = false;
         } else {
             carriageMotor->applySpeedAcceleration();
         }

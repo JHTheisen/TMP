@@ -63,15 +63,15 @@ class HostUiTests(unittest.TestCase):
         def axis(index):
             if scenario == "input_error" and clock.now > 0.9:
                 return float("nan")
-            if scenario == "telemetry" and clock.now > 1.9 and index == 2:
+            if scenario == "telemetry" and clock.now > 1.9 and index == 0:
                 return 0.7
-            if scenario == "long_pause" and clock.now > 1.0 and index == 2:
+            if scenario == "long_pause" and clock.now > 1.0 and index == 0:
                 return 0.7
-            if scenario == "uncentered" and index == 0:
+            if scenario == "uncentered" and index == 2:
                 return 0.7
             if 0.75 < clock.now < 0.85:
-                return 0.7 if index == 2 else (-0.7 if index == 1 else 0)
-            if 0.85 <= clock.now < 0.95 and index == 0:
+                return 0.7 if index == 0 else (-0.7 if index == 1 else 0)
+            if 0.85 <= clock.now < 0.95 and index == 2:
                 return -0.7
             return 0.0
         joystick.get_axis.side_effect = axis
@@ -143,7 +143,8 @@ class HostUiTests(unittest.TestCase):
             carriage_jogs = [value.split() for value in jogs if int(value.split()[3]) != 0]
             self.assertTrue(carriage_jogs)
             self.assertTrue(all(int(value[1]) == 0 and int(value[2]) == 0 for value in carriage_jogs))
-            self.assertTrue(all((int(value[3]) > 0) == (scenario == "inverted") for value in carriage_jogs))
+            # 7e144b0 applies carriage inversion with or without the legacy flag.
+            self.assertTrue(all(int(value[3]) > 0 for value in carriage_jogs))
             if scenario in ("normal", "inverted"):
                 self.assertEqual(jogs[-1], b"JOG 0 0 0\n")
             self.assertFalse(any(value.startswith((b"POSE", b"MOVE")) for value in writes))
@@ -214,7 +215,7 @@ class HostUiTests(unittest.TestCase):
     def test_ctrl_c_uses_stop(self):
         self.run_ui("interrupt")
 
-    def test_carriage_direction_inversion(self):
+    def test_legacy_invert_flag_preserves_current_carriage_direction(self):
         self.run_ui("inverted")
 
     def test_uncentered_carriage_prevents_arming(self):

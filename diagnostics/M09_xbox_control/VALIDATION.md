@@ -1,4 +1,126 @@
-# M09 offline validation — 2026-09-26
+# M09 offline validation — 2026-09-30
+
+## Current work: controller LEVEL/NORTH on clean 7e144b0
+
+Started with clean `7e144b0`. No commit, push, upload, real serial connection or
+physical motion was performed. The earlier experimental 200 Hz implementation
+was not present in this baseline and was not restored.
+
+New no-argument LEVEL/NORTH commands use the existing POSE motion state machine.
+LEVEL targets physically verified BNO Euler PITCH zero; NORTH targets reported
+magnetic heading zero by shortest angular difference. Motor signs, pins and
+normal POSE/MOVE behavior remain unchanged. Only the requested axis moves or is
+reported settled; tolerance is the existing 0.4 degrees. Slew uses the proven
+travel maxima (yaw 2000/2000 steps/s and steps/s^2, pitch 2400/2400). Existing
+precision corrections and post-stop settling remain. No second motion loop or
+new operator mode was added.
+
+Final verification passed: the complete `tests/run_host_tests.ps1` run, including
+all 52 explicit LEVEL/NORTH firmware scenarios, all existing C++ cases, all 119
+Python tests and all 23 protected M08 hashes. PlatformIO `run` passed with 47,532
+bytes RAM and 392,181 bytes flash. `git diff --check` passed.
+
+The physical LEVEL rejection came from the common POSE safety path applying its
+old absolute +/-75-degree pitch guard to LEVEL before the pitch-only controller
+could correct a healthy reading near -79 degrees. LEVEL now has selected-axis
+safety and a +/-89-degree BNO Euler-domain margin, while normal POSE retains its
+existing +/-75-degree target/travel rules.
+
+The repeated `north_usable=NO` came from coupling that status to `referenceSet`.
+That reference needs a stable one-second idle window, and continuous manual JOG
+keeps the command state non-idle, so fresh accepted accuracy-3 heading samples
+could never satisfy the old expression. Direct NORTH readiness now requires an
+initialized/reporting BNO, a fresh accepted finite rotation-vector heading and
+accuracy >=2. The stable idle reference remains separate and unchanged for POSE.
+`STATE` and `BNO_STATE` now include `north_reason` with the exact failed gate.
+
+Powered testing first exposed wrong large-error LEVEL motion at BNO pitch -51.056
+degrees. Continuous LEVEL slew therefore keeps its explicit positive-BNO-response
+sign `LEVEL_POSITIVE_BNO_PITCH_STEP_SIGN = 1`. A later precision-only run from
+-1.241 degrees proved that applying that same sign to finite `move()` bursts drove
+the measured pitch farther negative. LEVEL precision now retains the established
+finite pitch correction sign `POSITIVE_STEP_PITCH_SIGN = -1`; SLEW was not changed
+without new physical evidence. Timing validation selects the sign for the active
+motion mode. Manual pitch, POSE/MOVE, DIR-pin configuration, NORTH, and its accuracy
+>=2 gate are unchanged. Regressions exercise small +/- precision starts, large +/-
+SLEW-to-PRECISION transitions, and both sides of the transition threshold while
+asserting that the simulated BNO measurement moves toward zero. A reversed-plant
+case confirms the existing wrong-direction guard still fails LEVEL.
+
+The NORTH +/-185-degree guard is the existing generated-position/cable travel
+constraint around the qualified north target (or pitch-ready startup reference),
+not an inherited wrapped-angle limit. Heading 219 degrees is accepted when its
+continuous position and target are inside that window, and rejected after prior
+continuous travel places those same wrapped headings outside it. Rejections now
+include current/target offsets, shortest error, and the unchanged limit.
+
+Conversion audit: M09 has no hard-coded mechanical steps/degree/microstep setting.
+The 24 pitch / 16 yaw constants are proportional correction gains. Runtime BNO
+motion supplies the output pulses/degree estimate, including reduction and
+microstepping. Historical pitch diagnostics describe 200 full steps, 8x
+microsteps, approximately 15:1: nominal 66.667 pulses/output degree. The earlier
+reported powered pitch result was 71.866; neither is imposed as calibration.
+No fixed yaw ratio was found. Alignment measures response during motion, reuses
+the existing learned estimate if available, and sizes deadlines from displacement,
+axis profile, precision tail and settling (2x prediction + 10 s + pauses).
+Unknown response uses a 90 s bootstrap; measured timing can replace/extend it.
+Progress checks independently scale from predicted time for 0.15 degrees, with
+existing 2 s slew / 15 s precision minima. Wrong-way/frozen motion still fails.
+
+BNO grace is restricted to LEVEL/NORTH. Foreground begins controlled braking
+at 130 ms feedback age; the unchanged independent watchdog remains at 150 ms
+for foreground failure. Invalid/reset data also pauses. Recovery within 1500 ms
+requires one valid fresh sample actually received after stopping plus 100 ms
+observation, then resumes the same request/target. A newer malformed idle sample
+rejects admission until valid feedback arrives. Grace expiry uses clean STOP and
+READY, never a persistent sensor fault. Motor forced-stop uncertainty still
+invalidates keyframe epochs; normal braking and transient recovery preserve them.
+The host clears affected captures without canceling firmware's active recovery.
+
+A (0) requests LEVEL and Y (3) requests NORTH. D-pad diagonals are inactive; X
+remains duration and all cardinal hats and 7e144b0 axes/signs are retained. Each
+alignment button sends its command once; firmware brakes an active manual session
+and starts the request only after all axes stop. Existing manual takeover uses
+STOP, stopped READY, zero-JOG acknowledgment, then current live input without
+recentering. Raw autonomous POSE/MOVE/keyframe
+commands also participate in this handoff when sticks deliberately move; idle F2
+editing remains free of generated JOG. F3 remains presentation-only.
+
+44 focused C++ scenarios cover zero/tolerance, both signs/wrap, highest configured
+slew rates, unknown/nominal/high-reduction response, a successful pitch leg beyond
+90 s, transient/prolonged/invalid/reset BNO, missing startup BNO, admission,
+direction/progress guards, STOP during stalls and recovery, forced-watchdog
+recovery, latched abort and all requested repeated manual/keyframe/alignment
+sequences. Eight added Python tests (with sequence subtests) cover release/edge
+mapping, cancellation, terminal/deadline protocol, all requested handoff sequences,
+raw POSE takeover and subsequent keyframes/alignment. Existing regressions remain.
+
+The baseline's older Python fixture expectations did not match its committed
+axis mapping/inversion and reduced logging; 14 host-UI failures were reproduced
+before editing those fixtures. Those narrow expectations were aligned to the
+already-committed production behavior, without changing host rates/signs or
+logging. Raw/freeze fixtures center idle sticks so they do not accidentally
+request the newly required manual takeover. A simulated absolute moveTo endpoint
+was corrected to remain integer after fractional simulated manual braking.
+
+Files changed:
+- Firmware: `src/main.cpp`, `src/manual_control.h`, `src/pose_stop.h`, new
+  `src/orientation_commands.h`.
+- Host: `auto_control.py`, `xbox_control.py`.
+- Tests: new `tests/orientation_commands_test.cpp`, `tests/m09_lifecycle_test.cpp`,
+  `tests/run_host_tests.ps1`, `tests/stubs/FastAccelStepper.h`, `tests/test_auto_control.py`,
+  `tests/test_auto_ui.py`, `tests/test_display_freeze_ui.py`,
+  `tests/test_host_ui.py`, `tests/test_raw_command_ui.py`,
+  `tests/test_session_log.py`, `tests/test_xbox_control.py`.
+- Documentation: `README.md`, `VALIDATION.md`.
+
+No sensor-worker, command-watchdog, keyframe motion or motor-direction production
+source was changed. Manual rates and watchdog behavior remain unchanged; stopped
+manual completion gained only the pending LEVEL/NORTH handoff. Optional BNO remains
+independent of ordinary startup, JOG, generated-step carriage/keyframe motion and playback.
+Physical speed, pointing accuracy and torque margin still require powered testing.
+
+## Previous validation — 2026-09-26
 
 ## Current work: manual-first keyframes and optional-sensor independence
 

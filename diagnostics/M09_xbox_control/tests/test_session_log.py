@@ -28,16 +28,20 @@ class LoggingTests(unittest.TestCase):
         self.assertRegex(data, r"\d{4}-\d\d-\d\dT.*\+00:00 \+\d+\.\d+s")
         self.assertNotIn("STOP operator", second.path.read_text(encoding="utf-8"))
 
-    def test_quality_transition_and_each_reset_trace_are_not_sampled_away(self):
+    def test_quality_transition_is_immediate_and_traces_sampled_by_kind(self):
         log = self.logger()
         log.received("BNO_RAW raw_status=3 diagnostic_quality=PLAUSIBLE", 1.0)
         log.received("BNO_RAW raw_status=3 diagnostic_quality=MALFORMED", 1.01)
         log.received("BNO_TRACE kind=RESET_COMPLETE reset_event=1 at_us=123", 1.02)
         log.received("BNO_TRACE kind=RESET_COMPLETE reset_event=2 at_us=456", 1.03)
+        log.received("BNO_TRACE kind=REPORT_ENABLED at_us=789", 1.04)
+        log.received("BNO_TRACE kind=RESET_COMPLETE reset_event=3 at_us=999", 6.03)
         data = log.path.read_text(encoding="utf-8")
         self.assertIn("diagnostic_quality=MALFORMED", data)
         self.assertIn("reset_event=1", data)
-        self.assertIn("reset_event=2", data)
+        self.assertNotIn("reset_event=2", data)
+        self.assertIn("kind=REPORT_ENABLED", data)
+        self.assertIn("reset_event=3", data)
 
     def test_command_stream_is_sampled_but_edges_are_immediate(self):
         log = self.logger()
@@ -52,7 +56,7 @@ class LoggingTests(unittest.TestCase):
         for line in ("JOG 0 0 0", "JOG -100 0 0", "STOP", "X"):
             self.assertIn("TX_ATTEMPT " + line, data)
 
-    def test_raw_and_parsed_values_and_sensor_transitions(self):
+    def test_raw_values_and_sensor_transitions_without_parsed_duplicate(self):
         log = self.logger()
         raw = "BNO_RAW report_id=0x05 raw_status=0 q_w=0.999938965 q_x=0 q_y=0 q_z=0 accepted=YES age_ms=2"
         log.received(raw, 1.0)
@@ -62,8 +66,9 @@ class LoggingTests(unittest.TestCase):
         log.received("MANUAL REJECTED: stopping; wait for READY", 1.04)
         data = log.path.read_text(encoding="utf-8")
         self.assertIn(raw, data)
-        for value in ('"raw_status": "0"', '"raw_status": "3"', '"q_w": "0.999938965"', '"available": "NO"'):
+        for value in ("raw_status=0", "raw_status=3", "q_w=0.999938965", "available=NO"):
             self.assertIn(value, data)
+        self.assertNotIn(" | parsed=", data)
         self.assertIn("MANUAL REJECTED: stopping; wait for READY", data)
 
     def test_exception_traceback_survives_close(self):

@@ -116,7 +116,7 @@ class ManualSession:
                 self.raw_waiting = False
                 self.readiness_note = "Raw commands enabled; joystick JOG disabled. F2 exits without arming."
             elif self.auto_mode:
-                self.readiness_note = "Automatic action active; sticks cancel and take over. A/Space stops."
+                self.readiness_note = "Automatic action active; sticks cancel and take over. Space/F12 stops."
             else:
                 self.readiness_note = "Center sticks for 0.5 s to enable manual control."
         elif line == "M09 BUSY":
@@ -229,16 +229,17 @@ def arguments(argv=None):
     parser.add_argument("--log-dir", default=str(Path(__file__).resolve().parent / "logs"),
                         help="directory for a new timestamped diagnostic log each run")
     parser.add_argument("--controller", type=int, default=0)
-    parser.add_argument("--yaw-axis", type=int, default=0, help="right stick horizontal; verify with --dry-run")
+    parser.add_argument("--yaw-axis", type=int, default=0, help="left stick horizontal; verify with --dry-run")
     parser.add_argument("--pitch-axis", type=int, default=1, help="left stick vertical; verify with --dry-run")
-    parser.add_argument("--carriage-axis", type=int, default=2, help="left stick horizontal; verify with --dry-run")
-    parser.add_argument("--invert-carriage", action="store_true", help="reverse only the left/right carriage direction")
+    parser.add_argument("--carriage-axis", type=int, default=2, help="right stick horizontal; verify with --dry-run")
+    parser.add_argument("--invert-carriage", action="store_true", help="legacy flag; current carriage mapping already applies inversion")
     parser.add_argument("--invert-yaw", action="store_true")
     parser.add_argument("--no-invert-pitch", action="store_true", help="default maps stick up (negative raw) to positive physical pitch")
     parser.add_argument("--deadband", type=float, default=0.15)
     parser.add_argument("--speed-scale", type=float, default=1.0, help="fraction of existing ceilings, default 1.0; valid (0,1]")
     for name, default in (("capture-a", 4), ("capture-b", 5), ("duration", 2),
-                          ("play", 10), ("return-a", 8), ("increment", 9)):
+                          ("play", 10), ("return-a", 8), ("increment", 9),
+                          ("level", 0), ("north", 3)):
         parser.add_argument("--" + name + "-button", type=int, default=default,
                             help="pygame button index; confirm button/hat events with --dry-run")
     parser.add_argument("--move-hat", type=int, default=0, help="D-pad hat index; confirm with --dry-run")
@@ -249,9 +250,10 @@ def arguments(argv=None):
         parser.error("--speed-scale must be in (0,1]")
     if min(args.controller, args.yaw_axis, args.pitch_axis, args.carriage_axis) < 0 or len({args.yaw_axis, args.pitch_axis, args.carriage_axis}) != 3:
         parser.error("controller/axis indices must be nonnegative and yaw/pitch/carriage axes must differ")
-    buttons = [getattr(args, name + "_button") for name in ("capture_a", "capture_b", "duration", "play", "return_a", "increment")]
-    if min(buttons + [args.move_hat]) < 0 or len(set(buttons)) != len(buttons) or any(value in (0, 1) for value in buttons):
-        parser.error("AUTO buttons must be distinct, nonnegative, and must not replace A=0 or B=1")
+    buttons = [getattr(args, name + "_button") for name in
+               ("capture_a", "capture_b", "duration", "play", "return_a", "increment", "level", "north")]
+    if min(buttons + [args.move_hat]) < 0 or len(set(buttons)) != len(buttons) or any(value == 1 for value in buttons):
+        parser.error("motion buttons must be distinct, nonnegative, and must not replace B=1 abort")
     return args
 
 
@@ -312,7 +314,7 @@ def main(argv=None):
         response_snapshot = []
         held_buttons = set()
         hat_neutral = True
-        input_notice = "MANUAL + KEYFRAMES: LB/RB capture; Home plays. Y is unassigned."
+        input_notice = "LB/RB capture; Home plays; A = LEVEL; Y = magnetic NORTH."
         takeover = False
         while running:
             now = time.monotonic()
@@ -407,8 +409,7 @@ def main(argv=None):
             if any(event.type == pygame.QUIT or pressed(event, pygame.K_ESCAPE) for event in events):
                 break
             toggling_raw = any(pressed(event, pygame.K_F2) for event in events)
-            safety_stop = any(pressed(event, pygame.K_F12) or pressed(event, pygame.K_SPACE) or
-                              selected_button(event, 0) for event in events)
+            safety_stop = any(pressed(event, pygame.K_F12) or pressed(event, pygame.K_SPACE) for event in events)
             suppress_submit = safety_stop or toggling_raw or any(event.type == pygame.WINDOWFOCUSLOST for event in events)
             if safety_stop:
                 takeover = False
@@ -462,6 +463,7 @@ def main(argv=None):
                                 log.event("RAW_DRY_RUN", repr(data))
                             else:
                                 send(data, raw_command=True)
+                                auto.raw_sent(session.last_raw_command, now)
                             echo = f"{'RAW DRY RUN' if args.dry_run else 'RAW TX'}: {session.last_raw_command!r}"
                             print(echo)
                             lines = (lines + [echo])[-8:]
@@ -482,7 +484,8 @@ def main(argv=None):
                                 auto.duration = {5: 10, 10: 20, 20: 5}[auto.duration]
                         else:
                             action = {args.capture_a_button: "capture_a", args.capture_b_button: "capture_b",
-                                      args.return_a_button: "return_a", args.play_button: "play"}.get(event.button)
+                                      args.return_a_button: "return_a", args.play_button: "play",
+                                      args.level_button: "level", args.north_button: "north"}.get(event.button)
                     if action:
                         data = auto.request(action, now, centered_since is not None and now - centered_since >= 0.5)
                         if data is not None:
@@ -504,7 +507,13 @@ def main(argv=None):
             # A deliberate stick displacement cancels the entire sequence before
             # any prepared follow-up can be sent. Wait for STOP/READY and the zero
             # JOG acknowledgment, then use only the current live stick value.
-            if focused and not session.raw_mode and not suppress_submit and not centered and (auto.overridable or (was_automatic and auto.phase == "READY")):
+            if (focused and not suppress_submit and not centered and
+                    (auto.overridable or (was_automatic and auto.phase == "READY"))):
+                if session.raw_mode:
+                    # Explicit manual intervention leaves an executing raw motion,
+                    # using the same STOP/READY/zero-JOG handoff as button actions.
+                    session.raw_mode = session.raw_waiting = False
+                    pygame.key.stop_text_input()
                 stop = session.stop_raw(now)
                 if not args.dry_run:
                     send(stop)
@@ -544,13 +553,13 @@ def main(argv=None):
                 ("DISPLAY FROZEN | F3: resume latest | Controls, serial and logging remain LIVE"
                  if display_frozen else "DISPLAY LIVE | F3: freeze diagnostic values and scrolling responses only"),
                 f"{joystick.get_name()} | {'DRY RUN - SERIAL CLOSED' if args.dry_run else args.port + ' | ' + session.state.upper()}",
-               "Left stick horizontal = YAW; left stick vertical = PITCH; right stick horizontal = CARRIAGE."
+                "Left stick horizontal = YAW; left stick vertical = PITCH; right stick horizontal = CARRIAGE. "
                 f"Yaw axis {args.yaw_axis}, pitch axis {args.pitch_axis}, carriage axis {args.carriage_axis} | deadband {args.deadband:.2f} | speed scale {args.speed_scale:.2f}",
                 f"Yaw: {yaw:+5d}   Pitch: {pitch:+5d}   Carriage: {carriage:+5d}   Centered: {centered}   Ready: {session.ready}",
                 "Raw axes: " + "  ".join(f"{i}:{v:+.2f}" for i, v in enumerate(raw)),
                 input_notice,
-                "A / Space / F12: STOP. Keyboard X / B: latched abort. Esc / close: stop & exit.",
-                "F2: raw command line / leave & STOP. F12: STOP. In raw mode Space / A always STOP; Tab inserts spaces.",
+                "A: LEVEL. Y: magnetic NORTH. Space / F12: STOP. Keyboard X / B: latched abort.",
+                "F2: raw command line / leave & STOP. In raw mode Space / F12 stops; Tab inserts spaces.",
                 "Center sticks to enable manual. Stick movement cancels automatic actions. Keep window focused.",
                 f"Log: {log.path.name if log.path else 'UNAVAILABLE'} (full path printed at startup)" + (f" ERROR: {log.error}" if log.error else ""),
                 "",
