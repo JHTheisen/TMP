@@ -51,7 +51,7 @@ constexpr int32_t CARRIAGE_ACCELERATION = 2000;
 // Generated-step/manual travel is independent of the proven POSE precision caps.
 constexpr uint32_t PITCH_TRAVEL_SPEED_HZ = 2400;
 constexpr int32_t PITCH_TRAVEL_ACCELERATION = 2400;
-enum class Operation { NORTH_LEVEL, POSE, MANUAL, LEVEL, NORTH };
+enum class Operation { NORTH_LEVEL, POSE, MANUAL, LEVEL, NORTH, CELESTIAL };
 
 enum class Phase { STARTUP, BASELINE, MOVING, SETTLING, COMPLETE, ABORTED, MANUAL };
 enum class Motion { PRECISION, SLEW, BRAKING, HOLD };
@@ -144,6 +144,22 @@ int32_t yawStartSteps = 0, pitchStartSteps = 0;
 char commandLine[128];
 size_t commandLength = 0;
 bool commandOverflow = false;
+
+bool celestialTracking = false, celestialFailed = false;
+uint32_t celestialId = 0;
+bool celestialActive() { return poseActive && operation == Operation::CELESTIAL; }
+void stopCelestial(const char *reason, bool failed = true);
+void celestialSafety();
+void updateCelestialTiming(Axis &axis);
+uint32_t celestialProgressTimeout(const Axis &axis);
+void enterCelestialTracking();
+void celestialResult(const char *reason, bool latched);
+void celestialBnoUnavailable(const char *reason);
+void celestialRecordTrustedBno();
+void celestialRecordBnoRecovery(const EulerAngles &sample, uint8_t accuracy, uint32_t sampleAt);
+bool celestialUsingEncoderFeedback();
+bool celestialControlFeedbackReady();
+bool serviceCelestialEncoderFeedback(uint32_t now, uint32_t &sampleAt, bool &newSample);
 
 bool alignmentActive() { return poseActive && (operation == Operation::LEVEL || operation == Operation::NORTH); }
 bool pitchControlRequired() { return !alignmentActive() || operation == Operation::LEVEL; }
@@ -263,6 +279,7 @@ void setMotion(Axis &axis, Motion motion) {
 #include "pitch_direction_diagnostics.h"
 
 const char *phaseText() {
+    if (celestialActive()) return celestialTracking ? "CELESTIAL_TRACK" : "CELESTIAL_GOTO";
     switch (phase) { case Phase::STARTUP: return "STARTUP"; case Phase::BASELINE: return "BASELINE";
     case Phase::MOVING: return "MOVING"; case Phase::SETTLING: return "SETTLING";
     case Phase::COMPLETE: return "COMPLETE"; case Phase::ABORTED: return "ABORTED";
@@ -298,6 +315,7 @@ void stopMotors() {
 void finish(bool passed, const char *reason) {
     if (finalPrinted) return;
     const bool wasAlignment = operation == Operation::LEVEL || operation == Operation::NORTH;
+    const bool wasCelestial = operation == Operation::CELESTIAL;
     const bool recoverable = !passed && poseActive;
     if (passed && poseActive && poseNeedsBno) learnTimingResponse();
     stopMotors(); motionWatchdog.disarm(); finalPrinted = true; window.active = false;
@@ -327,7 +345,7 @@ void finish(bool passed, const char *reason) {
         "BNO accuracy low episodes/recoveries/longest_ms=%lu/%lu/%lu\n"
         "Independent BNO stale watchdog tripped=%s\n"
         "Reason: %s\nFINAL RESULT: %s\n%s\n",
-        wasAlignment ? alignmentName() : (operation == Operation::MANUAL ? "XBOX MANUAL" : (operation == Operation::POSE ? "GO TO POSE" : "PRESERVED M08 NORTH / LEVEL")),
+        wasCelestial ? "CELESTIAL" : (wasAlignment ? alignmentName() : (operation == Operation::MANUAL ? "XBOX MANUAL" : (operation == Operation::POSE ? "GO TO POSE" : "PRESERVED M08 NORTH / LEVEL"))),
         orientation.heading, bnoAccuracy, northUsable ? "YES" : "NO",
         wrap360(heading.first + yawAxis.target), pitchAxis.target, baselineHeading, baselinePitch,
         wasAlignment && operation == Operation::LEVEL ? "NOT_REQUESTED" : (yawAxis.settled ? "YES" : "NO"), yawAxis.error, static_cast<unsigned long>(yawAxis.bursts),
@@ -344,6 +362,7 @@ void finish(bool passed, const char *reason) {
         motionWatchdog.tripped() ? "YES" : "NO", reason, passed ? "PASS" : (recoverable ? "STOPPED" : "FAIL"),
         (passed || recoverable) ? "M09 READY" : "Latched abort; reset required. X/x aborts without automatic retry.");
     poseActive = poseStopping = alignmentPaused = false; carriagePending = false;
+    if (wasCelestial) celestialResult(reason, phase == Phase::ABORTED);
     // Terminal operation marker precedes READY so the existing host handoff
     // never has to guess whether this particular request finished.
     if (wasAlignment) {
@@ -355,6 +374,7 @@ void finish(bool passed, const char *reason) {
 }
 void abortTest(const char *reason, bool latch = false) {
     if (keyframeActive) { stopKeyframe(reason, true, latch); return; }
+    if (celestialActive() && !latch) { stopCelestial(reason); return; }
     if (alignmentActive() && !latch) { abortAlignment(reason); return; }
     if (latch) poseActive = false; // Explicit operator abort always remains latched.
     if (commandIdle()) finalPrinted = false;
@@ -372,6 +392,7 @@ void safety() {
         stopManualSession("command stream lost for 250 ms; rearm centered"); return;
     }
     if (manualActive || finalPrinted || !poseActive || poseStopping) return;
+    if (celestialActive()) { celestialSafety(); return; }
     // LEVEL/NORTH have selected-axis guards and recoverable feedback handling.
     // Do not apply combined-POSE yaw/pitch guards to their inactive axes.
     if (alignmentActive()) { alignmentSafety(); return; }
@@ -387,6 +408,13 @@ void safety() {
 }
 void invalidateOrientation(const char *reason) {
     const bool hadData = bnoValid || pitchReady || referenceSet;
+    if (celestialActive() && !poseStopping) {
+        bnoValid = pitchReady = referenceSet = northUsable = false;
+        window.active = false;
+        if (hadData) { queueText("BNO WARNING: "); queueText(reason); queueText("\n"); }
+        celestialBnoUnavailable(reason);
+        return;
+    }
     bnoValid = pitchReady = referenceSet = northUsable = false;
     heading = {}; window.active = false;
     if (hadData) { queueText("BNO WARNING: "); queueText(reason); queueText("\n"); }
@@ -458,10 +486,23 @@ void serviceBno() {
     if (!quaternionToEuler(event.un.rotationVector, result)) {
         bnoDiagnostics.reason = "invalid_quaternion";
         alignmentSampleInvalid = true;
-        if (alignmentActive()) invalidateOrientation("invalid BNO orientation");
+        if (alignmentActive() || celestialActive()) invalidateOrientation("invalid BNO orientation");
         ++invalidVectors; window.interrupted = true; return;
     }
     bnoDiagnostics.euler = result; bnoDiagnostics.eulerValid = true;
+    if (celestialActive() && event.status < BNO_MIN_ACCURACY) {
+        bnoAccuracy = event.status;
+        bnoValid = false;
+        bnoDiagnostics.reason = "accuracy_below_2";
+        celestialBnoUnavailable("BNO accuracy below 2");
+        return;
+    }
+    if (celestialActive() && celestialUsingEncoderFeedback()) {
+        celestialRecordBnoRecovery(result, event.status, sample.receivedMs);
+        bnoDiagnostics.accepted = true; bnoDiagnostics.reason = "accepted_recovery_report_only";
+        acceptedBnoSequence = event.sequence; acceptedBnoTimestamp = event.timestamp;
+        return;
+    }
     if (!heading.update(result.heading)) {
         bnoDiagnostics.reason = "ambiguous_heading";
         invalidateOrientation("ambiguous heading transition"); return;
@@ -472,6 +513,7 @@ void serviceBno() {
     acceptedBnoSequence = event.sequence; acceptedBnoTimestamp = event.timestamp;
     bnoValid = true; lastBnoGood = now;
     alignmentSampleInvalid = false;
+    if (celestialActive()) celestialRecordTrustedBno();
     if (poseActive && poseNeedsBno && !poseStopping && !alignmentPaused) {
         motionWatchdog.recordFresh(now);
     }
@@ -560,11 +602,14 @@ bool axisProgress(Axis &axis, double error) {
         queueText("YAW DIRECTION CONFIRMED: cumulative measured heading moved toward north\n");
     }
     axis.bestError = fmin(axis.bestError, magnitude);
-    if (magnitude <= axis.progressError - 0.15) { axis.progressError = magnitude; axis.lastProgress = lastBnoGood; }
-    if (magnitude <= TOLERANCE_DEG) axis.lastProgress = lastBnoGood;
+    const uint32_t feedbackAt = celestialActive() && celestialUsingEncoderFeedback() ? millis() : lastBnoGood;
+    if (magnitude <= axis.progressError - 0.15) { axis.progressError = magnitude; axis.lastProgress = feedbackAt; }
+    if (magnitude <= TOLERANCE_DEG) axis.lastProgress = feedbackAt;
     if (alignmentActive()) updateAlignmentTiming(axis);
-    const uint32_t timeout = alignmentActive() ? alignmentProgressTimeout(axis) :
-        (axis.motion == Motion::SLEW ? SLEW_PROGRESS_TIMEOUT_MS : PROGRESS_TIMEOUT_MS);
+    if (celestialActive()) updateCelestialTiming(axis);
+    const uint32_t timeout = celestialActive() ? celestialProgressTimeout(axis) :
+        (alignmentActive() ? alignmentProgressTimeout(axis) :
+        (axis.motion == Motion::SLEW ? SLEW_PROGRESS_TIMEOUT_MS : PROGRESS_TIMEOUT_MS));
     if (magnitude > TOLERANCE_DEG && now - axis.lastProgress >= timeout) {
         abortTest(axis.pitch ? "No measured pitch progress: axis deadline expired" : "No measured yaw progress: axis deadline expired"); return false;
     }
@@ -584,7 +629,8 @@ void updateVelocity(Axis &axis, uint32_t now) {
 }
 void commandAxis(Axis &axis) {
     safety();
-    if (finalPrinted || poseStopping || alignmentPaused || !fresh(millis()) || motionWatchdog.tripped() || axis.motor->isRunning()) return;
+    if (finalPrinted || poseStopping || alignmentPaused || !celestialControlFeedbackReady() ||
+        motionWatchdog.tripped() || axis.motor->isRunning()) return;
     if (!axis.pitch && !yawRequired) return;
     if (!posePrecisionOnly && axis.confirmed && !axis.slewFinished &&
         fabs(axis.error) > axis.brakeAtDeg + SLEW_ENTRY_HYSTERESIS_DEG) {
@@ -691,21 +737,27 @@ void serviceAxes() {
         }
         return;
     }
-    if (!fresh(millis())) return;
     const uint32_t now = millis();
+    const bool celestialEncoderFeedback = celestialActive() && celestialUsingEncoderFeedback();
+    if (!celestialEncoderFeedback && !fresh(now)) return;
     if (carriagePending || yawMotor->isRunning() || pitchMotor->isRunning() || carriageMotor->isRunning()) {
         poseStoppedObserved = false; settleSamples = 0;
     } else if (!poseStoppedObserved) {
         poseStoppedObserved = true; poseStoppedAt = now;
     }
-    // Cached values are useful for telemetry, but never constitute a new
-    // control decision, direction confirmation, velocity or settling sample.
-    if (lastControlSample == bnoHealth.freshSamples) return;
-    lastControlSample = bnoHealth.freshSamples;
-    const uint32_t sampleAt = lastBnoGood;
+    uint32_t sampleAt = lastBnoGood;
+    if (celestialEncoderFeedback) {
+        bool newSample = false;
+        if (!serviceCelestialEncoderFeedback(now, sampleAt, newSample) || !newSample) return;
+    } else {
+        // Cached values are useful for telemetry, but never constitute a new
+        // control decision, direction confirmation, velocity or settling sample.
+        if (lastControlSample == bnoHealth.freshSamples) return;
+        lastControlSample = bnoHealth.freshSamples;
+        yawAxis.current = heading.continuous; yawAxis.error = yawAxis.target - yawAxis.current;
+        pitchAxis.current = physicalPitch(); pitchAxis.error = pitchAxis.target - pitchAxis.current;
+    }
     if (!sampleAtOrAfter(sampleAt, controlStartedAt)) return;
-    yawAxis.current = heading.continuous; yawAxis.error = yawAxis.target - yawAxis.current;
-    pitchAxis.current = physicalPitch(); pitchAxis.error = pitchAxis.target - pitchAxis.current;
     // Absolute POSE always checks yaw; MOVE 0 dp ds explicitly leaves yaw uncontrolled.
     if ((yawRequired && !axisProgress(yawAxis, yawAxis.error)) ||
         (pitchControlRequired() && !axisProgress(pitchAxis, pitchAxis.error))) return;
@@ -713,6 +765,9 @@ void serviceAxes() {
     if (finalPrinted) return;
     if (pitchControlRequired()) serviceAxis(pitchAxis, now, sampleAt);
     if (finalPrinted || poseStopping || alignmentPaused) return;
+    // One persistent angular controller owns TRACK. Updating its targets never
+    // creates a new POSE, restarts a slew, or re-enters a terminal settling loop.
+    if (celestialActive() && celestialTracking) return;
     if (carriagePending) {
         safety(); if (finalPrinted) return;
         if (carriageMotor->setAcceleration(CARRIAGE_ACCELERATION) != 0 || carriageMotor->setSpeedInHz(carriageRateHz) != 0 ||
@@ -737,9 +792,10 @@ void serviceAxes() {
     }
     phase = Phase::SETTLING; ++settleSamples; settleLastSample = sampleAt;
     if (sampleAt - settleStarted >= SETTLE_MS && settleSamples >= 30) {
-        yawAxis.settled = (alignmentActive() ? yawRequired : referenceSet) && fabs(yawAxis.error) <= TOLERANCE_DEG;
+        yawAxis.settled = ((alignmentActive() || celestialActive()) ? yawRequired : referenceSet) && fabs(yawAxis.error) <= TOLERANCE_DEG;
         pitchAxis.settled = pitchControlRequired();
-        if (alignmentActive()) finish(true, operation == Operation::LEVEL ? "LEVEL: physical pitch zero settled" : "NORTH: magnetic heading zero settled");
+        if (celestialActive()) enterCelestialTracking();
+        else if (alignmentActive()) finish(true, operation == Operation::LEVEL ? "LEVEL: physical pitch zero settled" : "NORTH: magnetic heading zero settled");
         else if (poseActive) finish(true, !yawRequired ? "Pitch target stopped and settled; yaw control disabled" :
             "POSE complete: BNO angle targets settled; carriage generated-step target reached");
         else finish(true, "Measured axes stopped and settled");
@@ -896,6 +952,7 @@ bool parseAngle(const char *token, double &value) {
 }
 #include "manual_control.h"
 #include "keyframe_motion.h"
+#include "celestial_motion.h"
 void executeCommand() {
     char *tokens[8] = {}; unsigned count = 0; char *context = nullptr;
     for (char *token = strtok_r(commandLine, " \t", &context); token && count < 8; token = strtok_r(nullptr, " \t", &context)) tokens[count++] = token;
@@ -903,6 +960,7 @@ void executeCommand() {
     if (executeManualCommand(tokens, count)) return;
     if (executeKeyframeCommand(tokens, count)) return;
     if (executeOrientationCommand(tokens, count)) return;
+    if (executeCelestialCommand(tokens, count)) return;
     if (count != 4 || (strcmp(tokens[0], "POSE") != 0 && strcmp(tokens[0], "MOVE") != 0)) {
         rejectPose("use POSE yaw_deg pitch_deg carriage_steps or MOVE delta_yaw_deg delta_pitch_deg delta_steps"); return;
     }
@@ -1091,7 +1149,7 @@ void loop() {
     publishSensorContext();
     serviceTraceOutput();
     const uint32_t now = millis();
-    if (now - lastSensorDisplay >= 500) { lastSensorDisplay = now; sensorTelemetry(); }
+    if (now - lastSensorDisplay >= 500) { lastSensorDisplay = now; sensorTelemetry(); celestialTelemetry(); }
     if (!manualActive && now - lastDisplay >= 750) { lastDisplay = now; telemetry(); }
     serviceSerialOutput();
 #ifdef M07_HOST_TEST

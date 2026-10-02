@@ -39,7 +39,8 @@ public:
     }
     void forceStop() {
         if (!simulated::forceStops) simulated::firstForceStopAt = millis();
-        if (plant().drive == simulated::Drive::IDLE) plant().idleForceStopLatched = true;
+        if (simulated::latchIdleForceStop && plant().drive == simulated::Drive::IDLE)
+            plant().idleForceStopLatched = true;
         plant().drive = simulated::Drive::IDLE; plant().velocity = 0; plant().runningVisibleAt = 0;
         plant().stoppedAt = millis(); plant().needsStoppedSample = true;
         ++simulated::forceStops;

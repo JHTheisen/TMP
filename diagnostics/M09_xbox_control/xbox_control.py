@@ -237,6 +237,13 @@ def arguments(argv=None):
     parser.add_argument("--no-invert-pitch", action="store_true", help="default maps stick up (negative raw) to positive physical pitch")
     parser.add_argument("--deadband", type=float, default=0.15)
     parser.add_argument("--speed-scale", type=float, default=1.0, help="fraction of existing ceilings, default 1.0; valid (0,1]")
+    parser.add_argument("--latitude", help="celestial observer latitude in decimal degrees, north positive")
+    parser.add_argument("--longitude", help="celestial observer longitude in decimal degrees, east positive")
+    parser.add_argument("--elevation", default="0", help="celestial observer elevation in metres, default 0")
+    parser.add_argument("--magnetic-declination", help="configured true-minus-magnetic heading in degrees, east positive")
+    parser.add_argument("--heading-offset", default="0", help="optical azimuth offset after BNO heading direction and declination, in degrees")
+    parser.add_argument("--heading-direction", default="1", help="BNO heading to clockwise sky azimuth: +1 or -1; motor signs are unchanged")
+    parser.add_argument("--pitch-offset", default="0", help="optical altitude minus BNO physical pitch in degrees")
     for name, default in (("capture-a", 4), ("capture-b", 5), ("duration", 2),
                           ("play", 10), ("return-a", 8), ("increment", 9),
                           ("level", 0), ("north", 3)):
@@ -257,6 +264,26 @@ def arguments(argv=None):
     return args
 
 
+def configure_celestial(args, auto):
+    """Bad optional astronomy settings never prevent ordinary manual control."""
+    from celestial_coordinates import Observer, HeadingReference
+    try:
+        if (args.latitude is None) != (args.longitude is None):
+            raise ValueError("supply both --latitude and --longitude")
+        reference = HeadingReference(
+            None if args.magnetic_declination is None else float(args.magnetic_declination),
+            float(args.heading_offset), float(args.pitch_offset), int(args.heading_direction))
+        observer = (None if args.latitude is None else
+                    Observer(float(args.latitude), float(args.longitude), float(args.elevation)))
+        auto.configure_celestial(observer, reference)
+    except ValueError as error:
+        auto.configure_celestial(None, HeadingReference())
+        return "Celestial unavailable: " + str(error) + "; manual controls remain available."
+    if observer is None:
+        return "Celestial unavailable: configure --latitude and --longitude; manual controls remain available."
+    return "Celestial: " + observer.describe() + " | " + reference.describe() + " | host system UTC; offline."
+
+
 def main(argv=None):
     args = arguments(argv)
     log = SessionLog(args.log_dir, {**vars(args), "script": str(Path(__file__).resolve()),
@@ -266,6 +293,9 @@ def main(argv=None):
     port = None
     session = ManualSession()
     auto = AutoSession()
+    celestial_config = configure_celestial(args, auto)
+    print(celestial_config)
+    log.event("CELESTIAL_CONFIG", celestial_config)
     failed = False
     explicit_abort = False
     try:
@@ -316,6 +346,7 @@ def main(argv=None):
         hat_neutral = True
         input_notice = "LB/RB capture; Home plays; A = LEVEL; Y = magnetic NORTH."
         takeover = False
+        celestial_last_status = None
         while running:
             now = time.monotonic()
             events = pygame.event.get()  # Pumps input before every read, as in v05.
@@ -453,7 +484,40 @@ def main(argv=None):
                         session.raw_text = session.raw_text[:-1]
                     elif key in (pygame.K_RETURN, pygame.K_KP_ENTER) and not suppress_submit:
                         try:
-                            data = session.submit_raw()
+                            command = session.raw_text
+                            words = command.split()
+                            verb = words[0].upper() if words else ""
+                            celestial_request = verb == "TRACK_RADEC"
+                            if celestial_request:
+                                if session.raw_waiting or session.pending_stop:
+                                    raise ValueError("Waiting for READY after STOP; press Enter again when ready. Nothing queued.")
+                                data = auto.request_celestial(command, now,
+                                    centered_since is not None and now - centered_since >= .5,
+                                    dry_run=args.dry_run)
+                                session.last_raw_command = command
+                                session.raw_text = ""
+                                if not args.dry_run:
+                                    # F2 is only the entry surface for this
+                                    # host-managed workflow. Once accepted
+                                    # locally, leave raw mode so every terminal
+                                    # celestial path returns to ordinary manual
+                                    # readiness. The returned STOP below is the
+                                    # one already prepared by AutoSession.
+                                    session.leave_raw(now)
+                                    pygame.key.stop_text_input()
+                                    session.auto_mode = True
+                                    last_jog = centered_since = None
+                                    takeover = False
+                            elif verb.startswith("CELESTIAL") or verb in ("TRACK_BEGIN", "TRACK_SET"):
+                                raise ValueError("Use TRACK_RADEC <RA hours> <Dec degrees>; celestial motion protocol is host-managed.")
+                            else:
+                                if auto.action == "celestial" and verb not in ("STOP", "STATUS", "X"):
+                                    raise ValueError("Celestial motion active; STOP before sending another raw command.")
+                                if auto.action == "celestial" and verb in ("STOP", "STATUS") and words[0] != verb:
+                                    raise ValueError(f"Firmware commands are case-sensitive; use uppercase {verb}.")
+                                if auto.action == "celestial" and verb in ("STOP", "STATUS") and len(words) != 1:
+                                    raise ValueError(f"Use {verb} without arguments.")
+                                data = session.submit_raw()
                         except ValueError as error:
                             notice = str(error)
                             log.event("RAW_NOT_SENT", notice)
@@ -461,10 +525,15 @@ def main(argv=None):
                         else:
                             if args.dry_run:
                                 log.event("RAW_DRY_RUN", repr(data))
+                            elif celestial_request:
+                                log.event("CELESTIAL_REQUEST", session.last_raw_command)
+                                if data is not None:
+                                    send(data)
                             else:
                                 send(data, raw_command=True)
                                 auto.raw_sent(session.last_raw_command, now)
-                            echo = f"{'RAW DRY RUN' if args.dry_run else 'RAW TX'}: {session.last_raw_command!r}"
+                            label = "CELESTIAL REQUEST" if celestial_request else "RAW TX"
+                            echo = f"{'RAW DRY RUN' if args.dry_run else label}: {session.last_raw_command!r}"
                             print(echo)
                             lines = (lines + [echo])[-8:]
                     elif event.type == pygame.TEXTINPUT and event.text != " ":
@@ -546,6 +615,12 @@ def main(argv=None):
             if port is not None and now >= next_status:
                 send(b"STATUS\n")
                 next_status = now + 0.5
+            if auto.action == "celestial":
+                log.sampled("celestial", "CELESTIAL", " | ".join(auto.celestial_display_lines()),
+                            now, 1.0, auto.phase)
+            elif auto.celestial_status and celestial_last_status != (auto.phase, auto.note):
+                log.event("CELESTIAL", f"{auto.phase}: {auto.note}")
+            celestial_last_status = (auto.phase, auto.note)
             log.state(session)
             if args.dry_run:
                 log.sampled("dry_input", "INPUT_ONLY", f"yaw={yaw} pitch={pitch} carriage={carriage} raw={raw}", now, 0.5)
@@ -568,7 +643,9 @@ def main(argv=None):
                 raw_status = "WAITING FOR READY AFTER STOP" if session.raw_waiting else "Enter sends once; firmware decides admission"
                 display += [f"RAW MODE — JOG DISABLED | {raw_status}",
                             "Tab: space; Backspace: erase; Enter: send; F2: leave disarmed.",
-                            "> " + session.raw_text[-max(1, text_columns - 4):] + "_"]
+                            "> " + session.raw_text[-max(1, text_columns - 4):] + "_",
+                            "Celestial: TRACK_RADEC 18:36:56.3 +38:47:01 (RA hours; Dec degrees)"]
+                display += auto.celestial_display_lines()
             else:
                 display += auto.display_lines()
             # Cache only presentation text. Protocol state, RX/logging, joystick
@@ -616,6 +693,7 @@ def main(argv=None):
                 log.event("SERIAL", "closed")
             except Exception:
                 log.exception("Serial close failed")
+        auto.close()  # Invalidates optional astronomy work without waiting for its thread.
         if pygame is not None:
             try:
                 pygame.quit()

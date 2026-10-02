@@ -1,5 +1,6 @@
 ﻿"""Single-request manual/keyframe workflow; no pygame, serial or hardware access."""
 from dataclasses import dataclass
+from celestial_control import CelestialTracker, parse_tracking_command, RESULT_MAX_AGE
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,53 @@ class AutoSession:
         self.settle_until = None
         self.motion_started = None
         self.raw_command = None
+        self.celestial = None
+        self.celestial_ready = False
+        self.celestial_status = ""
+        self.celestial_feedback = ""
+
+    def configure_celestial(self, observer, reference):
+        if self.celestial is not None:
+            self.celestial.close()
+        self.celestial = CelestialTracker(observer, reference) if observer is not None else None
+
+    def request_celestial(self, command, now, centered, dry_run=False):
+        target = parse_tracking_command(command)
+        if self.celestial is None:
+            raise ValueError("Celestial tracking needs valid --latitude and --longitude settings.")
+        if not dry_run and (not self.enabled or self.phase != "READY"):
+            raise ValueError("Wait for READY before celestial GOTO; request was not queued.")
+        if not centered:
+            raise ValueError("Center sticks for 0.5 s before celestial GOTO.")
+        self.celestial_status = f"RA={target.ra_hours:.6f} h Dec={target.dec_deg:+.6f} deg"
+        if dry_run:
+            self.note = "Celestial dry run: " + self.celestial_status + "; no motion or coordinate calculation."
+            return None
+        self.celestial.begin(target, now)
+        self._new_request("celestial", "CELESTIAL_PREPARING", now)
+        self.action = "celestial"
+        self.raw_command = None
+        self.continuation = None
+        self.celestial_ready = False
+        self.celestial_feedback = ""
+        self.last_rx = now
+        self.deadline = now + 15.0
+        self.note = "Preparing current sky position; waiting for stopped READY."
+        return self._command("STOP")
+
+    def celestial_display_lines(self):
+        if not self.celestial_status:
+            return []
+        rows = [f"CELESTIAL | {self.phase} | {self.celestial_status}"]
+        if self.celestial:
+            rows += [self.celestial.observer.describe(), self.celestial.reference.describe()]
+        if self.celestial_feedback:
+            rows.append(self.celestial_feedback)
+        return rows + [self.note]
+
+    def close(self):
+        if self.celestial is not None:
+            self.celestial.close()
 
     @property
     def busy(self):
@@ -44,6 +92,8 @@ class AutoSession:
         self.note = "Captures cleared: " + reason
 
     def cancel(self, now, reason="STOP sent; wait for READY."):
+        if self.celestial is not None:
+            self.celestial.cancel()
         self.phase = "STOPPING"
         self.pending_id = self.purpose = self.continuation = self.action = None
         self.settle_until = None
@@ -82,6 +132,9 @@ class AutoSession:
         reclaimed by deliberate sticks.
         """
         words = command.split()
+        if words and words[0] == "STOP" and self.action == "celestial":
+            self.cancel(now)
+            return
         if words and words[0] in ("LEVEL", "NORTH", "POSE", "MOVE", "KEYMOVE", "KEYRETURN"):
             self.action = "raw"
             self.raw_command = words[0]
@@ -118,6 +171,8 @@ class AutoSession:
         return self._command("STOP")
 
     def _finish(self, note):
+        if self.action == "celestial" and self.celestial is not None:
+            self.celestial.cancel()
         self.phase = "FINISH_WAIT"
         self.pending_id = self.purpose = self.continuation = self.action = None
         self.note = note + " Waiting for READY."
@@ -138,7 +193,15 @@ class AutoSession:
                 self.note += "; firmware abort is latched; reset required."
             return
         if line == "M09 READY":
-            if self.phase == "PREFLIGHT_STOP":
+            if self.phase == "CELESTIAL_PREPARING":
+                self.celestial_ready = True
+            elif self.action == "celestial" and self.phase in ("CELESTIAL_GOTO", "CELESTIAL_TRACK"):
+                # READY after a firmware reset/stop must never leave a host
+                # update source alive, even if a terminal telemetry line was lost.
+                self._finish("Celestial operation ended at firmware READY.")
+                self.phase = "READY"
+                self.deadline = None
+            elif self.phase == "PREFLIGHT_STOP":
                 if self.action in ("capture_a", "capture_b", "return_a", "play"):
                     self._snapshot(now)
                 elif self.action in ("level", "north"):
@@ -162,6 +225,39 @@ class AutoSession:
                 self.phase = "READY"
                 self.pending_id = self.purpose = self.deadline = self.action = None
             return
+        if self.action == "celestial" and fields.get("id") == str(self.pending_id):
+            if line.startswith("CELESTIAL_ACCEPTED ") and self.phase == "CELESTIAL_GOTO_PENDING":
+                self.phase = "CELESTIAL_GOTO"
+                self.motion_started = now
+                self.deadline = now + 95.0
+            if line.startswith(("CELESTIAL_ACCEPTED ", "CELESTIAL_DEADLINE ")):
+                if self.phase == "CELESTIAL_GOTO":
+                    try:
+                        duration = int(fields["deadline_ms"])
+                        if 0 < duration < 2147483648:
+                            self.deadline = self.motion_started + duration / 1000.0 + 5.0
+                    except (ValueError, KeyError):
+                        pass
+                return
+            if line.startswith("CELESTIAL_TRACK ") or (
+                    line.startswith("CELESTIAL_STATE ") and fields.get("mode") == "TRACK"):
+                if self.phase in ("CELESTIAL_GOTO", "CELESTIAL_TRACK"):
+                    self.phase = "CELESTIAL_TRACK"
+                    self.deadline = None
+                    self.note = "Tracking; move sticks to take over, Space/F12 STOP, B abort."
+            if line.startswith("CELESTIAL_STATE "):
+                self.celestial_feedback = "BNO target/error yaw=" + fields.get("yaw_target", "?") + "/" + fields.get("yaw_error", "?") + " pitch=" + fields.get("pitch_target", "?") + "/" + fields.get("pitch_error", "?") + " deg"
+                return
+            if line.startswith("CELESTIAL_RESULT "):
+                self._finish(line)
+                self.deadline = now + 4.0
+                return
+            if line.startswith("CELESTIAL_REJECTED "):
+                # Rejected live updates may leave braking outstanding. STOP is
+                # also safe for rejected admission and guarantees a new READY.
+                self.cancel(now, line)
+                self.continuation = self._command("STOP")
+                return
         alignment = self._alignment()
         if alignment and line.startswith(alignment + " ACCEPTED") and self.phase == "MOVE_PENDING":
             self.phase = "MOVE_ACTIVE"
@@ -258,6 +354,32 @@ class AutoSession:
             self.phase = "FAULT"
             self.deadline = None
             return b"STOP\n"
+        if self.action == "celestial":
+            try:
+                if self.phase == "CELESTIAL_PREPARING":
+                    result = self.celestial.result(now)
+                    if result is None:
+                        result = self.celestial.latest
+                    if result is not None and self.celestial_ready:
+                        if now - result.requested_at > RESULT_MAX_AGE:
+                            if not self.celestial.pending:
+                                self.celestial._request(now)
+                            return None
+                        self.phase = "CELESTIAL_GOTO_PENDING"
+                        self.deadline = now + 4.0
+                        self.celestial.sent(now)
+                        self._describe_celestial(result)
+                        return self._command(f"CELESTIAL_GOTO {self.pending_id} {result.mount.heading_deg:.6f} {result.mount.pitch_deg:.6f}")
+                elif self.phase in ("CELESTIAL_GOTO", "CELESTIAL_TRACK"):
+                    result = self.celestial.update(now)
+                    if result is not None:
+                        self.celestial.sequence += 1
+                        self.celestial.sent(now)
+                        self._describe_celestial(result)
+                        return self._command(f"CELESTIAL_UPDATE {self.pending_id} {self.celestial.sequence} {result.mount.heading_deg:.6f} {result.mount.pitch_deg:.6f}")
+            except Exception as error:
+                self.cancel(now, f"Celestial canceled: {error}")
+                return self._command("STOP")
         if self.phase == "AT_A_SETTLE" and now >= self.settle_until:
             self._snapshot(now)
             self.purpose = "verify_a"
@@ -269,6 +391,14 @@ class AutoSession:
             return command
         return None
 
+    def _describe_celestial(self, result):
+        target = self.celestial.target
+        self.celestial_status = (f"RA={target.ra_hours:.6f} h Dec={target.dec_deg:+.6f} deg | "
+                                 f"Alt={result.horizontal.altitude_deg:.3f} Az={result.horizontal.azimuth_deg:.3f} deg | "
+                                 f"UTC={result.utc.isoformat(timespec='seconds')}")
+        if result.horizontal.warnings:
+            self.celestial_status += " | " + "; ".join(result.horizontal.warnings)
+
     def display_lines(self):
         captures = " | ".join(f"{slot}={self.frames[slot].steps if slot in self.frames else 'not saved'}" for slot in ("A", "B"))
         return [f"MANUAL + KEYFRAMES | {self.phase} | increment {self.increment} deg | duration {self.duration} s",
@@ -276,4 +406,4 @@ class AutoSession:
                 "LS click (8): return A | RS click (9): 1/2 deg | D-pad: up/down pitch, right/left yaw",
                 "A (0): LEVEL pitch | Y (3): NORTH yaw (magnetic)",
                 "Space/F12: STOP | B / keyboard X: abort | Move sticks to take over automatic motion",
-                f"Generated steps (startup-relative, unhomed): {captures}", self.note]
+                f"Generated steps (startup-relative, unhomed): {captures}", self.note] + self.celestial_display_lines()

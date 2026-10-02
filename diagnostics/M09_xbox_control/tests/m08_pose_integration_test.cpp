@@ -27,7 +27,7 @@ int main(int argc, char **argv) {
     simulated::independentTick = tick;
     simulated::baselineYaw = 20; simulated::baselinePitch = 8;
     if (scenario == "pitch_low" || scenario == "pitch_carriage_low") simulated::accuracy = 0;
-    setup(); advance(2200);
+    setup(); advance(simulated::accuracy < BNO_MIN_ACCURACY ? 3500 : 2200);
     CHECK(commandIdle() && pitchReady && simulated::commands.empty());
     // Known synthetic response exercises the learned-response planner. Separate
     // lifecycle coverage checks conservative first-boot precision admission.
@@ -66,7 +66,11 @@ int main(int argc, char **argv) {
             std::printf("PASS imperfect-quality POSE\n"); return 0;
         }
         else if (scenario == "reset") { simulated::resetDuringPoll = true; advance(30); }
-        else if (scenario == "runaway") { simulated::yawDisturbance = -2; advance(30); }
+        else if (scenario == "runaway") {
+            // The verified guard requires sustained rising error, not one
+            // noisy sample. Reverse the plant long enough to exercise it.
+            simulated::motors[0].physicalSign = 1; advance(2000);
+        }
         else if (scenario == "pitch_guard") { simulated::pitchDisturbance = 70; advance(30); }
         else if (scenario == "no_progress") { simulated::frozenFeedback = true; advance(16000); }
         else if (scenario == "timeout") { controlStartedAt = millis() - LEG_TIMEOUT_MS; advance(30); }

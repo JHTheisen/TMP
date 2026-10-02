@@ -1,5 +1,11 @@
 # M09 Xbox manual control
 
+Celestial RA/Dec GOTO and persistent alt-az tracking are now available from F2:
+`TRACK_RADEC <RA hours or hh:mm:ss> <Dec degrees or +/-dd:mm:ss>`.
+See [celestial setup, reference settings, behavior and first physical test](CELESTIAL.md).
+The feature extends the physically tested `a8c85a1` baseline; its physical
+pointing/tracking performance still needs supervised validation.
+
 M09 keeps the PC/Python -> serial JOG -> ESP32/FastAccelStepper architecture.
 The approved simplification restores both AS5600 readouts and makes manual
 velocity independent of orientation/reference availability. M08 is unchanged.
@@ -20,8 +26,8 @@ they are separate from the manual acceleration ceilings above.
 
 | Sensor | Bus | Address | Meaning |
 | --- | --- | --- | --- |
-| AS5600 A | Wire, SDA18/SCL19 | 0x36 | Wrapped sensor/magnet angle; axis mapping is not invented |
-| AS5600 B | Wire1, SDA4/SCL5 | 0x36 | Historically pitch motor shaft, before reduction |
+| AS5600 A | Wire, SDA18/SCL19 | 0x36 | Wrapped sensor/magnet angle; celestial fallback assigns relative yaw |
+| AS5600 B | Wire1, SDA4/SCL5 | 0x36 | Pitch motor shaft before reduction; celestial fallback assigns relative pitch |
 | BNO085 | Wire1, SDA4/SCL5 | 0x4A | Moving-cradle orientation; qualified magnetic heading |
 
 Both buses retain 100 kHz and the configured 50 ms transaction timeout (the
@@ -29,7 +35,9 @@ underlying ESP-IDF error path can still block longer). AS5600 STATUS and
 RAW_ANGLE are read together, one device per scheduled call, alternating at a
 10 ms minimum global cadence (about 20 ms/device when calls are quick). No OTP,
 zero, scale or calibration registers are written. Read failures are local data
-availability changes. No encoder readings command motors or enforce limits.
+availability changes. Manual, LEVEL, NORTH, POSE and keyframes do not use encoder
+readings for control. An admitted celestial session can use both as relative
+feedback after BNO degradation, as described below.
 
 ## Startup and sensor availability
 
@@ -298,6 +306,25 @@ Focus loss also requests STOP. These safety actions take priority over an Enter
 queued in the same input batch. Command text is accepted only in the explicit
 focused editor; Xbox buttons are never text.
 
+`TRACK_RADEC` is the one host-managed exception to persistent raw mode. A valid
+celestial request leaves F2 immediately, before preparation/GOTO begins, so its
+completion, refusal, calculation failure, STOP, or cancellation returns to the
+ordinary manual-ready workflow. Malformed `TRACK_RADEC` input remains in F2 for
+correction. During CELESTIAL_GOTO/TRACK, deliberate stick input uses the same
+STOP -> READY -> zero-JOG -> live-input takeover as the other automatic actions.
+
+Celestial admission still requires fresh valid accuracy-2/3 BNO orientation.
+During healthy motion, firmware learns signed AS5600 A/yaw and AS5600 B/pitch
+relative scales instead of assuming raw shaft degrees equal cradle degrees. Once
+that celestial session sees any BNO loss, stale/invalid sample, reset or low
+accuracy, it keeps the session and target and permanently uses the last
+trustworthy BNO frame propagated by the two AS5600s. There is no BNO-outage
+timeout. Missing or unlearned encoder feedback causes a preserving HOLD, not
+session failure. Recovered BNO data is discrepancy telemetry only; it cannot
+re-anchor the frame or cause a catch-up move. Independent target-lease, travel,
+direction/progress and motor guards remain active. This behavior is celestial
+only; LEVEL, NORTH and POSE keep their existing BNO failure handling.
+
 Press **F2 again** to leave the editor; this also sends STOP and leaves manual
 control disarmed. Wait for READY and center sticks for 0.5 seconds; the host then
 performs the existing manual arming handshake. Manual traffic never
@@ -336,8 +363,8 @@ The same firmware commands `LEVEL` and `NORTH` are available for diagnostics.
 LEVEL drives only the physical pitch motor, using the powered-test mounting's
 **BNO Euler PITCH**, with target zero and error `0 - physical_pitch`. Separate roll
 does not command pitch. Powered tests established the two LEVEL command paths
-independently: continuous `runForward()` uses the LEVEL-specific `+1` BNO-response
-sign, while finite precision `move()` retains the physically verified legacy
+independently: the tested `a8c85a1` source uses the LEVEL-specific `-1` BNO-response
+sign for continuous slew, while finite precision `move()` retains the verified legacy
 pitch correction sign `-1`. Manual pitch and existing POSE/MOVE remain unchanged.
 NORTH drives only yaw toward zero of the existing
 `SH2_ROTATION_VECTOR` magnetic heading: `shortestDifference(0, heading)` selects
@@ -565,7 +592,9 @@ Historical automatic-startup and fallback fixtures run against the unchanged M08
 source, separately from M09. The M08 SHA256 snapshot is checked at the end.
 See [VALIDATION.md](VALIDATION.md) for the actual results and limitations.
 
-Python needs pygame and pyserial from `requirements.txt`. On this machine the
+Python needs pygame and pyserial from `requirements.txt`; celestial tracking also
+uses Astropy 7.2.2 on Python 3.11+. Astropy is loaded only for celestial work and
+its absence cannot disable manual control. On this machine the
 previously installed packages are in `.pio/python_deps`; the old `.venv` references
 an unavailable Python3.6 installation. The offline runner uses PlatformIO's Python
 and that existing package directory. The same environment can run input-only:

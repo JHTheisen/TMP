@@ -1,2 +1,5 @@
 pygame==2.6.1
 pyserial==3.5
+# Celestial coordinates only; imports stay optional for ordinary manual control.
+# Requires Python 3.11+. Bundled IERS data avoids network access while tracking.
+astropy==7.2.2

@@ -123,15 +123,12 @@ int main(int argc, char **argv) {
     if (test=="level_eighty") simulated::baselinePitch=-79;
     if (test=="level_guard") simulated::baselinePitch=89.2;
     setup();
-    // Powered evidence established the two production LEVEL paths separately:
-    // runForward() increased BNO pitch in the large-error repair, while a
-    // positive finite move() decreased BNO pitch in the later -1.24 deg test.
-    // This is an empirical controller/driver plant fixture, not library API
-    // documentation; manual and POSE retain their older fixture convention.
-    simulated::motors[1].physicalSign=1;
-    simulated::motors[1].finitePhysicalMultiplier=-1;
-    if (test=="level_delayed_slew_start") simulated::motors[1].physicalSign=-1;
-    if (test=="level_wrong_direction") simulated::motors[1].physicalSign=-1;
+    // The physically verified a8c85a1 baseline uses -1 for both continuous
+    // and finite LEVEL commands. Keep the two responses independently
+    // configurable while matching that baseline's actual powered sign.
+    simulated::motors[1].physicalSign=-1;
+    simulated::motors[1].finitePhysicalMultiplier=1;
+    if (test=="level_wrong_direction") simulated::motors[1].physicalSign=1;
     if (test=="north_usability") {
         advance(50); command("JOG 0 0 0"); advance(2100);
         CHECK(manualActive && bnoValid && bnoAccuracy==3 && northUsable && !referenceSet);
@@ -344,13 +341,13 @@ int main(int argc, char **argv) {
                 CHECK(Serial.output.find("mode=PRECISION requested_bno_dir=-1 step_sign=1")!=std::string::npos);
             }
             if (test=="level_negative") {
-                CHECK(Serial.output.find("mode=SLEW requested_bno_dir=1 step_sign=1")!=std::string::npos);
-                CHECK(Serial.output.find("call=runForward rc=0")!=std::string::npos);
+                CHECK(Serial.output.find("mode=SLEW requested_bno_dir=1 step_sign=-1")!=std::string::npos);
+                CHECK(Serial.output.find("call=runBackward rc=0")!=std::string::npos);
                 CHECK(Serial.output.find("mode=PRECISION requested_bno_dir=1 step_sign=-1")!=std::string::npos);
             }
             if (test=="level_positive") {
-                CHECK(Serial.output.find("mode=SLEW requested_bno_dir=-1 step_sign=-1")!=std::string::npos);
-                CHECK(Serial.output.find("call=runBackward rc=0")!=std::string::npos);
+                CHECK(Serial.output.find("mode=SLEW requested_bno_dir=-1 step_sign=1")!=std::string::npos);
+                CHECK(Serial.output.find("call=runForward rc=0")!=std::string::npos);
                 CHECK(Serial.output.find("mode=PRECISION requested_bno_dir=-1 step_sign=1")!=std::string::npos);
             }
         }

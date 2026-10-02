@@ -56,6 +56,12 @@ try {
         'missing','handoffs','admission','level_guard','invalid_admission','north_usability',
         'manual_handoff','level_manual_first_yaw','pending_stop','level_forced','north_forced','level_pause_stop','north_pause_stop')
     Build-Test 'keyframe_math_test.cpp' 'keyframe_math'
+    Build-Test 'celestial_motion_test.cpp' 'celestial_motion'
+    Run-Cases 'celestial_motion' @('goto','goto_unqualified','high_reduction','tracking','wrap','missing','low_admission','invalid','busy','yaw_guard',
+        'stop','track_stop','abort','track_abort','stale','track_stale','accuracy','track_accuracy','reset','track_reset',
+        'bad_feedback','track_unavailable','track_intermittent','track_encoder_feedback','track_long_outage','track_recovery','track_manual',
+        'lease','track_lease','stale_update','target_jump','updated_guard','no_progress','wrong_direction',
+        'deadline','blocked_foreground')
     & '.pio/host_tests/keyframe_math.exe'
     if ($LASTEXITCODE -ne 0) { throw 'Keyframe timing math failed' }
     Build-Test 'keyframe_motion_test.cpp' 'keyframe_motion'

@@ -83,7 +83,9 @@ int main(int argc, char **argv) {
     simulated::rawBnoRoll = -13;
     simulated::baselineYaw = 20; simulated::baselinePitch = 8;
     if (scenario == "pitch_low" || scenario == "unqualified") simulated::accuracy = 0;
-    setup(); advance(2200);
+    // Low startup accuracy triggers one established recovery at 2000 ms;
+    // allow the independent pitch reference window to qualify after that reset.
+    setup(); advance(simulated::accuracy < BNO_MIN_ACCURACY ? 3500 : 2200);
     CHECK(commandIdle() && pitchReady && simulated::commands.empty());
     CHECK(yawPulsesPerDegree == 0 && pitchPulsesPerDegree == 0);
     CHECK(fabs(physicalPitch() - 8) < 0.001);

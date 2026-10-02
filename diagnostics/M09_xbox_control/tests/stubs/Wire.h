@@ -51,8 +51,15 @@ public:
         const int index = readIndex_++;
         if (index == encoder.failedReadIndex || index >= encoder.requestLength) return -1;
         if (index == 0) return encoder.status;
-        if (index == 1) return encoder.highOverride >= 0 ? encoder.highOverride : encoder.raw >> 8;
-        if (index == 2) return encoder.raw & 0xFF;
+        uint16_t raw = encoder.raw;
+        if (simulated::encoderPlantFeedback && bus < 2) {
+            double degrees = simulated::encoderBaselineDegrees[bus] +
+                simulated::motors[bus].position * simulated::encoderDegreesPerStep[bus];
+            degrees = fmod(degrees, 360.0); if (degrees < 0) degrees += 360.0;
+            raw = static_cast<uint16_t>(degrees * 4096.0 / 360.0) & 0x0fffU;
+        }
+        if (index == 1) return encoder.highOverride >= 0 ? encoder.highOverride : raw >> 8;
+        if (index == 2) return raw & 0xFF;
         return -1;
     }
 private:

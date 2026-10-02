@@ -104,7 +104,10 @@ int main(int argc, char **argv) {
     CHECK(carriageMotor->directionPin == 21 && carriageMotor->stepPin == 22);
     CHECK(POSITIVE_STEP_PITCH_SIGN == -1 && TRIAL_POSITIVE_STEP_YAW_SIGN == -1);
 
-    if (scenario.compare(0, 8, "startup_") == 0) {
+    // Recovery scenarios have their own timed assertions below; do not consume
+    // them in the generic startup branch before those checks can run.
+    if (scenario.compare(0, 8, "startup_") == 0 && scenario != "startup_accuracy_recovery" &&
+        scenario != "startup_accuracy_recovery_failure") {
         advance(2200);
         CHECK(commandIdle() && manualReady() && simulated::commands.empty());
         CHECK(Serial.output.find("M09 READY") != std::string::npos);
@@ -165,14 +168,15 @@ int main(int argc, char **argv) {
         CHECK(commandIdle() && manualReady() && simulated::commands.empty());
     } else if (scenario == "startup_accuracy_recovery") {
         advance(600);
+        line("JOG 0 0 0"); // Established zero-JOG handshake before live commands.
         line("JOG 250 250 250");
         CHECK(manualActive && yawMotor->isRunning() && pitchMotor->isRunning() && carriageMotor->isRunning());
-        advance(3200);
+        stream(250, 250, 250, 3200); // Maintain the existing 250 ms host lease.
         CHECK(simulated::bnoBeginCalls >= 2 && simulated::sh2CloseCalls == 1);
         CHECK(manualActive && !commandWatchdog.tripped());
         CHECK(Serial.output.find("BNO_TRACE kind=STARTUP_ACCURACY_STUCK") != std::string::npos);
         CHECK(Serial.output.find("BNO_TRACE kind=REINIT_SUCCESS") != std::string::npos);
-        advance(400);
+        stream(250, 250, 250, 400);
         CHECK(bnoAccuracy == 3 && bnoValid && manualActive);
         CHECK(Serial.output.find("BNO_TRACE kind=RECOVERY_SUCCESS") != std::string::npos);
         line("STOP");
@@ -180,14 +184,15 @@ int main(int argc, char **argv) {
         CHECK(commandIdle() && manualReady());
     } else if (scenario == "startup_accuracy_recovery_failure") {
         advance(600);
+        line("JOG 0 0 0");
         line("JOG 250 250 250");
         CHECK(manualActive && yawMotor->isRunning() && pitchMotor->isRunning() && carriageMotor->isRunning());
-        advance(3200);
+        stream(250, 250, 250, 3200);
         CHECK(simulated::bnoBeginCalls == 2 && simulated::sh2CloseCalls == 1);
         CHECK(manualActive && !commandWatchdog.tripped());
         CHECK(Serial.output.find("BNO_TRACE kind=STARTUP_ACCURACY_STUCK") != std::string::npos);
         CHECK(Serial.output.find("BNO_TRACE kind=REINIT_FAILURE") != std::string::npos);
-        advance(3500);
+        stream(250, 250, 250, 3500);
         CHECK(simulated::bnoBeginCalls == 2 && manualActive && !commandWatchdog.tripped());
         line("STOP");
         waitUntilIdle(1000);

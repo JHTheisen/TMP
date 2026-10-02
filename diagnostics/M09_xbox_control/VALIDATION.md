@@ -1,4 +1,143 @@
-# M09 offline validation — 2026-09-30
+# M09 offline validation — 2026-10-02
+
+## Celestial GOTO and continuous target tracking
+
+Started from clean, physically tested `a8c85a1` (`Stable manual control, LEVEL,
+NORTH, and autonomous handoff`). No rollback, commit, push, upload, real serial
+connection or physical motion was performed. The implementation is ready for
+supervised physical validation, not yet physically validated.
+
+Inspection confirmed FastAccelStepper owns deterministic step generation; the
+sensor worker owns I2C; Python owns operator intent and multi-command sequencing.
+POSE/alignment consume accepted BNO heading and Euler PITCH, while keyframes use
+generated motor counts. Encoder readouts do not define pointing angles. The
+current baseline source's LEVEL continuous sign is -1 (older README prose and
+test fixtures said +1); that production sign and all existing axis mappings were
+preserved. README now describes the actual source.
+
+Python now provides `TRACK_RADEC` through F2, observer/elevation CLI options,
+explicit north correction, optical offsets and BNO heading handedness. Astropy
+7.2.2 was chosen for Python 3.11 compatibility and mature ICRS-to-AltAz/Earth
+orientation handling. Astropy imports and calculations occur on a bounded daemon
+worker; failures and stale results cannot block or restart manual control.
+Automatic IERS downloads are disabled; degraded data coverage is reported.
+
+Physical follow-up found a celestial-only manual-restoration regression. A valid
+`TRACK_RADEC` started the managed AutoSession but left `ManualSession.raw_mode`
+true. Celestial terminal paths correctly cleared `AutoSession.action`; after that,
+the shared takeover predicate had no active autonomous operation to escape and
+raw mode continued suppressing every JOG frame. LEVEL/NORTH/POSE/keyframes never
+entered through this F2 state and were unaffected.
+
+The fix is confined to the successful `TRACK_RADEC` submission boundary. It calls
+the existing raw-editor exit routine, stops pygame text input, and sends the one
+STOP already prepared by AutoSession. Malformed input stays in F2. GOTO/TRACK
+stick motion now reaches the unchanged shared STOP -> READY -> zero-JOG -> live
+input takeover. All terminal celestial outcomes return to ordinary centered
+manual arming, and a later explicit F2 enter/exit retains its established behavior.
+
+The existing AutoSession owns preparation, GOTO and TRACK, with its established
+operator STOP/READY/zero-JOG handoff. Firmware adds one persistent CELESTIAL
+operation to the existing POSE axis service. It settles once into TRACK, updates
+targets in place around 1 Hz, and retains finite precision corrections and
+0.4-degree hold hysteresis. Both axes can evolve together. GOTO uses dynamic
+dual-axis timing and tracking has a 3-second target-update lease.
+
+The observed active-session failure was caused by celestial inheriting all three
+BNO-fatal paths from POSE: reset/invalid samples called global orientation
+invalidation, stale/low accuracy failed `celestialSafety()`, and the independent
+150 ms BNO watchdog could force-stop motors. The controller also had no relative
+orientation source after BNO loss.
+
+Celestial admission still requires fresh accuracy-2/3 BNO. While it is healthy,
+the firmware now unwraps AS5600 A/B and learns each signed shaft-to-cradle scale
+from simultaneous BNO movement. At the first BNO fault it disarms the
+celestial-only use of the stale watchdog, freezes the last trusted absolute frame,
+and permanently propagates yaw/pitch from encoder-measured relative motion. No
+commanded-step estimate replaces feedback. Missing or unlearned encoder feedback
+brakes to a session-preserving HOLD with its time excluded from GOTO/progress
+deadlines. BNO recovery reports discrepancy and remains comparison-only; it does
+not re-anchor, blend, move, terminate or restart the session. The target lease,
+mechanical/travel guards, manual takeover and STOP/B behavior remain unchanged.
+LEVEL, NORTH, POSE and keyframes retain their original sensor behavior.
+
+Final verification:
+
+- `tests/run_host_tests.ps1`: PASS, all C++ cases including **36 celestial
+  scenarios**, **180 Python tests**, and all **23 protected M08 file hashes**.
+  Evidence: `.pio/celestial_bno_regression.txt`. Python's expected negative-CLI tests
+  print argparse errors; its final result is `OK`, with process exit code 0.
+- Focused celestial/F2 integration: PASS, **17 tests**, covering below-horizon
+  refusal, calculation failure, GOTO/track joystick takeover, STOP recovery and
+  later F2 exit. Evidence: `.pio/celestial_takeover_tests.txt`.
+- PlatformIO `run` compile only: PASS, RAM **48,100 bytes**, flash **402,621 bytes**.
+  Evidence: `.pio/celestial_bno_build.txt`. Build needed existing PlatformIO cache
+  access outside the workspace; no upload target was invoked.
+- Python byte compilation of all four affected production modules: PASS.
+- `git diff --check`: PASS.
+
+New Python tests cover strict notation/negative declination/RA wrapping, a
+published Astropy M33/Bear Mountain altitude reference, five-minute real sky
+evolution, no-network conversion, old IERS coverage, reference offsets/direction,
+bounded workers, delayed/failed calculations, ten minutes of update scheduling,
+correlated acknowledgments, all cancellation paths, and headless UI input priority.
+The UI includes real AutoSession integration with a deterministic coordinate
+mailbox, proving editor -> GOTO -> TRACK -> STOP/READY/zero-JOG/live-input behavior.
+
+Firmware cases cover READY admission (including fresh BNO before idle north
+qualification), learned and initially unknown drivetrain timing, high-reduction
+GOTO beyond the original 90-second bootstrap, simultaneous axes, five-minute
+TRACK, heading wrap, pre-admission missing/low-quality BNO, post-admission
+stale/low-accuracy/reset/invalid/intermittent/continuous BNO outages, a simulated
+seven-day outage, encoder-authoritative disturbance response, comparison-only
+BNO recovery, STOP/manual recovery, missing updates despite STATUS, wrong/stale
+session packets, geometry/rate refusal and stalled/reversed plants.
+
+The first recursive run exposed stale baseline test fixtures. Representative
+failures were reproduced against unchanged `a8c85a1` source before correcting
+fixtures; production legacy controls were not changed to satisfy them:
+
+- The synthetic driver's idle-forceStop latch was applied unconditionally to
+  every watchdog recovery, falsely suppressing the next run. It is now opt-in
+  for the existing `idle_force_stop_recovery` regression, which remains enabled.
+- LEVEL's synthetic continuous and finite signs now match the actual -1
+  baseline; reversed-plant guard tests still deliberately reverse them.
+- Low-accuracy POSE fixtures allow the existing startup recovery to finish and
+  references to requalify; the sustained runaway test uses a reversed plant for
+  the guard's real observation interval, instead of one instantaneous disturbance.
+- Startup accuracy-recovery tests had been swallowed by a generic prefix branch;
+  they now reach their dedicated assertions and supply the baseline's zero-JOG
+  handshake plus live command stream throughout the test.
+
+Changed production files:
+
+- `celestial_coordinates.py` (new): parsing, observer, Astropy conversion, sky/BNO mapping.
+- `celestial_control.py` (new): asynchronous coordinate mailbox and update cadence.
+- `auto_control.py`: celestial lifecycle, correlated protocol and cancellation.
+- `xbox_control.py`: observer/reference CLI, F2 command interception and diagnostics.
+- `src/celestial_motion.h` (new): firmware admission, updates, timing, lease and telemetry.
+- `src/main.cpp`: small operation hooks into existing safety, axis service and completion.
+- `requirements.txt`: optional-at-runtime Astropy dependency.
+
+Changed tests/documentation:
+
+- New `tests/celestial_motion_test.cpp`, `tests/test_celestial_coordinates.py`,
+  `tests/test_celestial_control.py`, `tests/test_celestial_ui.py`.
+- `tests/run_host_tests.ps1`, `tests/m09_lifecycle_test.cpp`,
+  `tests/m08_pose_integration_test.cpp`, `tests/pose_restoration_test.cpp`,
+  `tests/manual_integration_test.cpp`, `tests/orientation_commands_test.cpp`,
+  `tests/stubs/Arduino.h`, `tests/stubs/FastAccelStepper.h`.
+- `CELESTIAL.md` (new), `README.md`, `VALIDATION.md`.
+
+Physical assumptions and first-test instructions are in [CELESTIAL.md](CELESTIAL.md).
+Verify geographic heading handedness, optical/BNO offsets, supplied declination,
+level base, clearance and pitch convention. Current mechanical guards remain
+strict +/-75-degree BNO pitch and +/-185-degree continuous yaw. No field rotation,
+proper-motion catalog model, refraction correction or camera feedback is added.
+The 0.4-degree correction threshold and finite bursts limit narrow-field use;
+record actual drift/jitter over several minutes before claiming success.
+
+## Historical validation — 2026-09-30
 
 ## Current work: controller LEVEL/NORTH on clean 7e144b0
 

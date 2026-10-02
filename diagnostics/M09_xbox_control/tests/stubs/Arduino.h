@@ -44,6 +44,10 @@ struct MoveCommand {
 };
 static uint32_t now = 0, lastSampleAt = 0;
 static uint32_t continuousStartDelayMs = 0;
+// Opt-in reproduction of the historical idle forceStop/start latch. Normal
+// watchdog recovery deliberately repeats forceStop while draining its queue;
+// that does not assert every real driver permanently drops its next run.
+static bool latchIdleForceStop = false;
 // Independent GPIO latch fixture: intentionally not derived from motor sign.
 static uint32_t gpioOutput = 0;
 static PlantMotor motors[3];
@@ -58,6 +62,9 @@ static bool invalidQuaternion = false, wrongReportType = false;
 static uint8_t accuracy = 3;
 static double baselineYaw = 70.0, baselinePitch = 24.0;
 static double noiseAmplitude = 0, yawDisturbance = 0, pitchDisturbance = 0;
+static bool encoderPlantFeedback = false;
+static double encoderBaselineDegrees[2] = {37.0, 113.0};
+static double encoderDegreesPerStep[2] = {-0.18, -0.225};
 // Historical M08 tests retain their original roll-mounted plant. Current M09
 // fixtures opt into the powered-log mounting, where cradle pitch is BNO pitch.
 static bool physicalPitchUsesRoll = true;

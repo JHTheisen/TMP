@@ -69,6 +69,7 @@ int main(int argc, char **argv) {
         simulated::continuousStartDelayMs = 0;
         stop();
     } else if (scenario == "idle_force_stop_recovery") {
+        simulated::latchIdleForceStop = true;
         stopMotors();
         arm(); stream(200, 200, 300);
         CHECK(manualActive && yawMotor->isRunning() && pitchMotor->isRunning());
