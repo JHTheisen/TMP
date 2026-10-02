@@ -1,6 +1,7 @@
 # M09 Xbox manual control
 
-Celestial RA/Dec GOTO and persistent alt-az tracking are now available from F2:
+Celestial RA/Dec GOTO and persistent alt-az tracking are available from the
+operator dashboard (with F2 retained as a development shortcut):
 `TRACK_RADEC <RA hours or hh:mm:ss> <Dec degrees or +/-dd:mm:ss>`.
 See [celestial setup, reference settings, behavior and first physical test](CELESTIAL.md).
 The feature extends the physically tested `a8c85a1` baseline; its physical
@@ -266,6 +267,33 @@ First supervised validation after a separately authorized upload:
    establish torque margin or detect missed physical steps.
 
 No upload or physical motion was performed during this implementation.
+
+## Operator dashboard
+
+`xbox_control.py` opens a normal Windows desktop window with title-bar controls.
+It can be moved, resized, maximized and restored; the layout has an 820x620
+minimum working size. The compact view shows the current firmware/automatic mode,
+manual or autonomous state, measured yaw and pitch, BNO health, both AS5600 health
+states, controller/serial status, and the current celestial target. Active
+celestial tracking is highlighted. When celestial feedback has fallen back to
+the encoders, the dashboard explicitly shows **ENCODER PROPAGATED / BNO DEGRADED**.
+
+Enter RA and Dec in the two target fields and press Enter or click **TRACK
+RA/DEC**. The fields support cursor editing, selection, Ctrl+A and Ctrl+V. Pasting
+either `18:36:56.3 +38:47:01` or the complete `TRACK_RADEC ...` command fills both
+fields. The dashboard calls the same host-managed celestial request path used by
+F2; it does not send `TRACK_RADEC` directly to firmware.
+
+LEVEL, NORTH, STOP, latched ABORT, keyframe capture A/B, return A and play A-to-B
+are available as buttons. These buttons call the existing `AutoSession` and
+`ManualSession` paths used by keyboard and Xbox inputs. Keyboard and controller
+bindings remain active. The red STOP button is recoverable; ABORT remains the
+separate latched `X` command.
+
+Use **Show diagnostics** to open the full telemetry/log overlay and **Hide
+diagnostics** to return to the dashboard. Serial reads remain nonblocking and
+bounded, and celestial calculations stay on the existing worker, so showing or
+hiding diagnostics does not change controller timing or motion state.
 
 ## Freeze diagnostic display
 

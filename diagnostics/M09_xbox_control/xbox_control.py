@@ -2,10 +2,10 @@
 import argparse
 import math
 from pathlib import Path
-import textwrap
 import time
 from session_log import SessionLog
 from auto_control import AutoSession
+from operator_dashboard import OperatorDashboard
 
 SEND_INTERVAL = 0.020
 COMMAND_TIMEOUT = 0.250  # Same command lease as the firmware; a lapse needs a new arm.
@@ -39,6 +39,8 @@ class ManualSession:
         self.encoder_status_at = {}
         self.bno_raw_fields = {}
         self.bno_raw_at = None
+        self.celestial_fields = {}
+        self.celestial_status_at = None
         self.pending_stop = False
         self.readiness_note = "Waiting for firmware status."
         self.raw_mode = False
@@ -76,6 +78,9 @@ class ManualSession:
         elif line.startswith("ENCODER_STATE ") and fields.get("bus") in ("A", "B"):
             self.encoder_fields[fields["bus"]] = fields
             self.encoder_status_at[fields["bus"]] = now
+        elif line.startswith("CELESTIAL_STATE "):
+            self.celestial_fields = fields
+            self.celestial_status_at = now
         elif line.startswith("STATE "):
             self.firmware_phase = line.split()[1]
             # Accept older firmware's status without overwriting dedicated sensor reports.
@@ -307,11 +312,14 @@ def main(argv=None):
         joystick.init()
         if max(args.yaw_axis, args.pitch_axis, args.carriage_axis) >= joystick.get_numaxes():
             raise RuntimeError("Selected axis unavailable; inspect with valid --yaw-axis/--pitch-axis/--carriage-axis indices")
-        screen = pygame.display.set_mode((1100, 960))
-        pygame.display.set_caption("M09 Xbox manual control" + (" - DRY RUN (no serial)" if args.dry_run else ""))
+        screen = pygame.display.set_mode((1100, 760), pygame.RESIZABLE)
+        pygame.display.set_caption("M09 Gimbal Operator" + (" - DRY RUN (no serial)" if args.dry_run else ""))
+        try:
+            pygame._sdl2.Window.from_display_module().minimum_size = (820, 620)
+        except (AttributeError, pygame.error):
+            pass  # Older SDL builds still retain ordinary resizable window chrome.
         pygame.key.stop_text_input()  # Ordinary control keys are never command text.
-        font = pygame.font.SysFont("consolas", 18)
-        text_columns = (screen.get_width() - 24) // font.size("M")[0]
+        dashboard = OperatorDashboard(pygame)
         lines = []
         if not args.dry_run:
             import serial
@@ -367,6 +375,7 @@ def main(argv=None):
                 elif event.type == pygame.WINDOWFOCUSGAINED:
                     log.event("INPUT", "window focus gained")
                     focused = True
+            ui_actions = dashboard.handle_events(events, session.raw_mode) if focused else []
             was_automatic = auto.overridable
             if port is not None:
                 received = port.read(min(port.in_waiting, 4096))
@@ -434,13 +443,15 @@ def main(argv=None):
                         hat_neutral = False
             # Safety actions win over Enter even when queued later in the same
             # pygame batch. No raw move should precede an already-pending stop.
-            if any(pressed(event, pygame.K_x) or selected_button(event, 1) for event in events):
+            if ("abort" in ui_actions or
+                    any(pressed(event, pygame.K_x) or selected_button(event, 1) for event in events)):
                 explicit_abort = True
-                raise RuntimeError("Operator keyboard X / controller B abort")
+                raise RuntimeError("Operator latched abort")
             if any(event.type == pygame.QUIT or pressed(event, pygame.K_ESCAPE) for event in events):
                 break
             toggling_raw = any(pressed(event, pygame.K_F2) for event in events)
-            safety_stop = any(pressed(event, pygame.K_F12) or pressed(event, pygame.K_SPACE) for event in events)
+            safety_stop = ("stop" in ui_actions or
+                           any(pressed(event, pygame.K_F12) or pressed(event, pygame.K_SPACE) for event in events))
             suppress_submit = safety_stop or toggling_raw or any(event.type == pygame.WINDOWFOCUSLOST for event in events)
             if safety_stop:
                 takeover = False
@@ -456,9 +467,11 @@ def main(argv=None):
                 key = event.key if event.type == pygame.KEYDOWN else None
                 if key == pygame.K_F3 and focused and not getattr(event, "repeat", False):
                     display_frozen = not display_frozen
+                    dashboard.toggle_diagnostics(True)
                     log.event("DISPLAY", "frozen; controls and telemetry remain live" if display_frozen else "live; showing latest state")
                     continue
                 if key == pygame.K_F2 and focused and not getattr(event, "repeat", False):
+                    dashboard.blur_editor()
                     takeover = False
                     auto.leave(now)
                     session.auto_mode = True
@@ -573,6 +586,54 @@ def main(argv=None):
                         else:
                             log.event("AUTO_NOT_SENT", auto.note)
                     continue
+            if not session.raw_mode and focused and not suppress_submit:
+                # GUI buttons use the exact same AutoSession request paths as
+                # their existing gamepad equivalents. No motion policy lives
+                # in the dashboard.
+                for action in ui_actions:
+                    if action in ("stop", "abort", "diagnostics"):
+                        continue
+                    if action == "track":
+                        try:
+                            command = dashboard.celestial_command()
+                            data = auto.request_celestial(
+                                command, now,
+                                centered_since is not None and now - centered_since >= .5,
+                                dry_run=args.dry_run)
+                            session.last_raw_command = command
+                        except ValueError as error:
+                            notice = str(error)
+                            dashboard.notice = notice
+                            log.event("CELESTIAL_NOT_SENT", notice)
+                            lines = (lines + [notice])[-8:]
+                        else:
+                            dashboard.notice = "Celestial request accepted by host."
+                            log.event("CELESTIAL_REQUEST", command)
+                            if args.dry_run:
+                                print(f"AUTO DRY RUN: {command!r}")
+                            elif data is not None:
+                                session.stop_raw(now)
+                                session.auto_mode = True
+                                last_jog = centered_since = None
+                                takeover = False
+                                send(data)
+                        continue
+                    if action in ("level", "north", "capture_a", "capture_b", "return_a", "play"):
+                        data = auto.request(action, now, centered_since is not None and now - centered_since >= .5)
+                        if data is not None:
+                            session.stop_raw(now)
+                            session.auto_mode = True
+                            last_jog = centered_since = None
+                            takeover = False
+                            log.event("AUTO_TX", repr(data))
+                            if args.dry_run:
+                                print(f"AUTO DRY RUN: {data!r}")
+                                auto.cancel(now, "Dry run: no firmware response or movement; captures require firmware.")
+                                auto.receive("M09 READY", now)
+                            else:
+                                send(data)
+                        else:
+                            log.event("AUTO_NOT_SENT", auto.note)
             # A deliberate stick displacement cancels the entire sequence before
             # any prepared follow-up can be sent. Wait for STOP/READY and the zero
             # JOG acknowledgment, then use only the current live stick value.
@@ -624,48 +685,21 @@ def main(argv=None):
             log.state(session)
             if args.dry_run:
                 log.sampled("dry_input", "INPUT_ONLY", f"yaw={yaw} pitch={pitch} carriage={carriage} raw={raw}", now, 0.5)
-            display = [
-                ("DISPLAY FROZEN | F3: resume latest | Controls, serial and logging remain LIVE"
-                 if display_frozen else "DISPLAY LIVE | F3: freeze diagnostic values and scrolling responses only"),
-                f"{joystick.get_name()} | {'DRY RUN - SERIAL CLOSED' if args.dry_run else args.port + ' | ' + session.state.upper()}",
-                "Left stick horizontal = YAW; left stick vertical = PITCH; right stick horizontal = CARRIAGE. "
-                f"Yaw axis {args.yaw_axis}, pitch axis {args.pitch_axis}, carriage axis {args.carriage_axis} | deadband {args.deadband:.2f} | speed scale {args.speed_scale:.2f}",
-                f"Yaw: {yaw:+5d}   Pitch: {pitch:+5d}   Carriage: {carriage:+5d}   Centered: {centered}   Ready: {session.ready}",
-                "Raw axes: " + "  ".join(f"{i}:{v:+.2f}" for i, v in enumerate(raw)),
-                input_notice,
-                "A: LEVEL. Y: magnetic NORTH. Space / F12: STOP. Keyboard X / B: latched abort.",
-                "F2: raw command line / leave & STOP. In raw mode Space / F12 stops; Tab inserts spaces.",
-                "Center sticks to enable manual. Stick movement cancels automatic actions. Keep window focused.",
-                f"Log: {log.path.name if log.path else 'UNAVAILABLE'} (full path printed at startup)" + (f" ERROR: {log.error}" if log.error else ""),
-                "",
-            ]
-            if session.raw_mode:
-                raw_status = "WAITING FOR READY AFTER STOP" if session.raw_waiting else "Enter sends once; firmware decides admission"
-                display += [f"RAW MODE — JOG DISABLED | {raw_status}",
-                            "Tab: space; Backspace: erase; Enter: send; F2: leave disarmed.",
-                            "> " + session.raw_text[-max(1, text_columns - 4):] + "_",
-                            "Celestial: TRACK_RADEC 18:36:56.3 +38:47:01 (RA hours; Dec degrees)"]
-                display += auto.celestial_display_lines()
-            else:
-                display += auto.display_lines()
             # Cache only presentation text. Protocol state, RX/logging, joystick
             # processing and the raw-command editor above always remain live.
             if not display_frozen or diagnostic_snapshot is None:
                 diagnostic_snapshot = session.diagnostic_lines(now) + [""] if not args.dry_run else []
                 response_snapshot = list(lines)
-            display += diagnostic_snapshot
-            display = [row for line in display for row in (textwrap.wrap(line, text_columns) or [""])]
-            log_rows = [row for line in response_snapshot for row in (textwrap.wrap(line, text_columns) or [""])]
-            available_rows = max(0, (screen.get_height() - 24) // 23 - len(display))
-            if available_rows:
-                display += log_rows[-available_rows:]
-            screen.fill((20, 24, 30))
-            if display_frozen:
-                screen.fill((255, 195, 45), (0, 0, screen.get_width(), 35))
-            for i, line in enumerate(display):
-                color = (20, 24, 30) if display_frozen and i == 0 else (230, 235, 242)
-                screen.blit(font.render(line, True, color), (12, 12 + i * 23))
-            pygame.display.flip()
+            dashboard.draw(
+                screen, now=now, session=session, auto=auto,
+                joystick_name=joystick.get_name(),
+                serial_label="DRY RUN - CLOSED" if args.dry_run else f"{args.port} | {session.state.upper()}",
+                yaw=yaw, pitch=pitch, carriage=carriage, centered=centered,
+                raw_axes=raw, input_notice=dashboard.notice or input_notice,
+                log_label=(log.path.name if log.path else "UNAVAILABLE"),
+                display_frozen=display_frozen,
+                diagnostic_lines=(diagnostic_snapshot + auto.display_lines()),
+                response_lines=response_snapshot)
             time.sleep(0.005)
     except KeyboardInterrupt:
         failed = True

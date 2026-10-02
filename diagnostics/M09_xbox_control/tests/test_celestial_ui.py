@@ -33,7 +33,7 @@ def submit(value=TARGET):
 
 class CelestialUiTests(unittest.TestCase):
     def run_ui(self, actions=(), *, until=3.0, dry_run=False, config=None,
-               real_session=False, worker_error=None):
+               real_session=False, worker_error=None, gui_entry=False):
         class Clock:
             now = 0.0
             def monotonic(self):
@@ -157,7 +157,8 @@ class CelestialUiTests(unittest.TestCase):
         joystick.get_instance_id.return_value = 42
         joystick.get_name.return_value = "Celestial test controller"
         joystick.get_axis.side_effect = lambda index: port.axes[index]
-        schedule = sorted([(.8, [key(pygame.K_F2)])] + list(actions), key=lambda action: action[0])
+        initial = [] if gui_entry else [(.8, [key(pygame.K_F2)])]
+        schedule = sorted(initial + list(actions), key=lambda action: action[0])
         sent = set()
 
         def events():
@@ -221,6 +222,21 @@ class CelestialUiTests(unittest.TestCase):
         self.assertIn("CELESTIAL CELESTIAL_TRACK", log)
         self.assertLessEqual(log.count(" CELESTIAL "), 4)
         self.assertFalse(any(at >= .8 and data.startswith(b"JOG") for at, data in writes))
+
+    def test_dashboard_target_fields_submit_through_managed_celestial_path(self):
+        click = lambda pos: pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=pos)
+        result, writes, requests, session, auto, rows, log = self.run_ui([
+            (.8, [click((100, 320)), pygame.event.Event(pygame.TEXTINPUT, text="18:36:56.3")]),
+            (.9, [click((550, 320)), pygame.event.Event(pygame.TEXTINPUT, text="+38:47:01")]),
+            (1.4, [click((990, 320))]),
+        ], gui_entry=True)
+        self.assertEqual(result, 0)
+        self.assertEqual([request[0] for request in requests], [TARGET])
+        self.assertEqual(session.last_raw_command, TARGET)
+        self.assertFalse(session.raw_mode)
+        self.assertEqual(auto.phase, "CELESTIAL_TRACK")
+        self.assertFalse(any(data.startswith(b"TRACK_RADEC") for _, data in writes))
+        self.assertIn("CELESTIAL_REQUEST " + TARGET, log)
 
     def test_safety_batch_prevents_celestial_start(self):
         for event in (key(pygame.K_SPACE), key(pygame.K_F12), key(pygame.K_F2),
