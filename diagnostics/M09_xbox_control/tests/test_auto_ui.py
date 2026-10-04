@@ -34,6 +34,33 @@ def hat(value):
 
 
 class AutoUiTests(unittest.TestCase):
+    def test_bno_display_failures_leave_manual_and_keyframe_serial_stream_unchanged(self):
+        actions = [(.7, lambda port: port.axes.__setitem__(1, -.8)),
+                   (.8, lambda port: port.axes.__setitem__(1, 0)),
+                   (.9, tap(4)), (1.2, tap(5)), (1.8, tap(10))]
+        baseline = self.run_ui(actions, until=3.5)
+        def telemetry(port):
+            port.rx += (b"BNO_STATE available=YES has_sample=YES fresh=YES age_ms=10 "
+                        b"accuracy=3 heading=123 physical_pitch=12 pitch_axis=PITCH pitch_roll=-5\n")
+        def failed(port):
+            port.rx += (b"BNO_STATE available=NO has_sample=NO fresh=NO age_ms=4294967295 "
+                        b"accuracy=bad heading=nan physical_pitch=inf pitch_roll=garbage\n")
+        def stale(port):
+            port.rx += (b"BNO_STATE available=YES has_sample=YES fresh=NO age_ms=4000 "
+                        b"accuracy=0 heading=123 physical_pitch=12 pitch_axis=PITCH pitch_roll=-5\n")
+        result, writes, _, auto, frames, _ = self.run_ui(
+            actions + [(.65, telemetry), (.75, failed), (1.0, stale), (1.9, failed), (2.4, telemetry)],
+            until=3.5)
+        self.assertEqual(result, 0)
+        self.assertEqual(writes, baseline[1])
+        self.assertEqual(auto.frames, baseline[3].frames)
+        self.assertTrue(any(data == b"JOG 0 585 0\n" for _, data in writes))
+        self.assertTrue(any(data.startswith(b"KEYMOVE ") for _, data in writes))
+        rows = [row for _, frame in frames for row in frame]
+        self.assertIn("UNAVAILABLE", rows)
+        self.assertIn("STALE", rows)
+        self.assertIn("Pitch 12.00°", rows)
+
     def run_ui(self, actions=(), *, until=2.5, dry_run=False, snapshots=True):
         class Clock:
             now = 0.0
@@ -223,13 +250,23 @@ class AutoUiTests(unittest.TestCase):
 
     def test_stop_and_abort_win_over_play_in_same_batch(self):
         for safety in (key(pygame.K_SPACE), key(pygame.K_F12), key(pygame.K_F2),
-                       button(1), key(pygame.K_x), pygame.event.Event(pygame.WINDOWFOCUSLOST)):
+                       button(1), key(pygame.K_x)):
             with self.subTest(safety=safety):
                 _, writes, _, _, _, _ = self.run_ui([
                     (.8, tap(4)), (1.1, tap(5)), (1.8, tap(10) + [safety])])
                 self.assertFalse(any(data.startswith((b"KEYMOVE", b"KEYRETURN")) for _, data in writes))
                 self.assertEqual(len([data for _, data in writes if data.startswith(b"SNAP")]), 2)
                 self.assertTrue(any(at >= 1.8 and data.strip() in (b"STOP", b"X") for at, data in writes))
+
+    def test_focus_changes_do_not_interrupt_keyframe_playback(self):
+        actions = [(.8, tap(4)), (1.1, tap(5)), (1.8, tap(10))]
+        baseline = self.run_ui(actions, until=2.5)
+        result, writes, _, auto, _, _ = self.run_ui(
+            actions + [(1.9, [pygame.event.Event(pygame.WINDOWFOCUSLOST)]),
+                       (2.2, [pygame.event.Event(pygame.WINDOWFOCUSGAINED)])], until=2.5)
+        self.assertEqual(result, 0)
+        self.assertEqual(writes, baseline[1])
+        self.assertEqual(auto.phase, baseline[3].phase)
 
     def test_raw_mode_disables_keyframe_buttons(self):
         _, writes, session, auto, _, _ = self.run_ui([

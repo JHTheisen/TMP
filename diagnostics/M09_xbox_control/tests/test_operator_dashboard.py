@@ -1,5 +1,6 @@
 """Headless tests for the presentation-only operator dashboard."""
 import os
+import copy
 from pathlib import Path
 import sys
 import unittest
@@ -15,6 +16,11 @@ import pygame
 from auto_control import AutoSession
 from operator_dashboard import OperatorDashboard
 from xbox_control import ManualSession
+
+
+BNO_REPORT = ("BNO_STATE available=YES has_sample=YES fresh=YES age_ms=10 "
+              "accuracy=3 north_usable=YES heading=301.800 physical_pitch=-9.989 "
+              "pitch_axis=PITCH pitch_roll=3.571")
 
 
 class RecordingFont:
@@ -44,14 +50,103 @@ class OperatorDashboardTests(unittest.TestCase):
         session, auto = ManualSession(), AutoSession()
         return screen, dashboard, session, auto
 
-    def draw(self, screen, dashboard, session, auto):
+    def draw(self, screen, dashboard, session, auto, now=2.0, display_frozen=False):
         dashboard.draw(
-            screen, now=2.0, session=session, auto=auto,
+            screen, now=now, session=session, auto=auto,
             joystick_name="Test Xbox", serial_label="COM9 | ACTIVE",
             yaw=12, pitch=-34, carriage=0, centered=True,
             raw_axes=[0.0] * 6, input_notice="controller connected",
-            log_label="test.log", display_frozen=False,
+            log_label="test.log", display_frozen=display_frozen,
             diagnostic_lines=session.diagnostic_lines(2.0), response_lines=[])
+
+    def test_live_orientation_uses_existing_sensor_angles_even_while_display_frozen(self):
+        screen, dashboard, session, auto = self.make_dashboard()
+        output = []
+        dashboard.small = RecordingFont(dashboard.small, output)
+        session.receive(BNO_REPORT, 1.9)
+        # Celestial targets/encoder feedback and rejected raw samples must not
+        # replace the sensor orientation used for manual setup.
+        session.receive("CELESTIAL_STATE yaw_target=100 yaw_error=2 pitch_target=50 pitch_error=1", 1.9)
+        session.receive("BNO_RAW yaw_deg=999 pitch_deg=999 roll_deg=999 accepted=NO", 1.9)
+        auto.action, auto.phase = "celestial", "CELESTIAL_TRACK"
+        before = copy.deepcopy((vars(session), vars(auto)))
+        self.draw(screen, dashboard, session, auto, display_frozen=True)
+        self.assertIn("Pitch -9.99°", output)
+        self.assertIn("Roll 3.57°", output)
+        self.assertIn("Heading/yaw 301.80°", output)
+        self.assertEqual((vars(session), vars(auto)), before)
+        output.clear()
+        session.receive(BNO_REPORT.replace("-9.989", "12.500").replace("3.571", "-4.250"), 2.1)
+        self.draw(screen, dashboard, session, auto, now=2.2, display_frozen=True)
+        self.assertIn("Pitch 12.50°", output)
+        self.assertIn("Roll -4.25°", output)
+
+    def test_optional_orientation_failures_never_change_manual_commands_or_buttons(self):
+        fields = dict(token.split("=", 1) for token in BNO_REPORT.split()[1:])
+        cases = [(None, "UNAVAILABLE"), ({}, "UNAVAILABLE")]
+        for key, value in (("available", "NO"), ("has_sample", "NO"), ("valid", "NO"),
+                           ("pitch_axis", "ROLL"), ("fresh", "?"),
+                           ("age_ms", "nan"), ("age_ms", "inf"), ("age_ms", "-1")):
+            cases.append(({**fields, key: value}, "UNAVAILABLE"))
+        for key in ("physical_pitch", "pitch_roll", "heading"):
+            for value in ("nan", "inf", "-inf", "bad", "", "1e999", "999999999"):
+                cases.append(({**fields, key: value}, "UNAVAILABLE"))
+            cases.append(({name: value for name, value in fields.items() if name != key}, "UNAVAILABLE"))
+        cases += [({**fields, "fresh": "NO"}, "STALE"),
+                  ({**fields, "age_ms": "2001"}, "STALE")]
+        for report, expected in cases:
+            with self.subTest(report=report):
+                screen, dashboard, session, auto = self.make_dashboard()
+                session.receive("M09 READY", 1)
+                session.arm(1.1, True)
+                session.receive("MANUAL READY: test", 1.2)
+                if report is not None:
+                    session.receive("BNO_STATE " + " ".join(f"{key}={value}" for key, value in report.items()), 1.9)
+                before = copy.deepcopy((vars(session), vars(auto)))
+                output = []
+                dashboard.font = RecordingFont(dashboard.font, output)
+                self.draw(screen, dashboard, session, auto)
+                self.assertIn(expected, output)
+                self.assertEqual((vars(session), vars(auto)), before)
+                self.assertEqual(session.frame(2, 120, -50, 75), b"JOG 120 -50 75\n")
+                for name in ("track", "level", "north", "capture_a", "capture_b", "play", "stop", "abort"):
+                    event = pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1,
+                                               pos=dashboard.buttons[name].center)
+                    self.assertEqual(dashboard.handle_events([event]), [name])
+
+    def test_orientation_expires_without_reports_and_recovers(self):
+        session = ManualSession()
+        session.receive(BNO_REPORT, 1)
+        self.assertEqual(OperatorDashboard._bno_orientation(session.sensor_fields, session.sensor_status_at, 1.1)[0], "LIVE")
+        # Unrelated telemetry cannot refresh BNO orientation.
+        session.receive("STATE MANUAL heading=999", 3)
+        self.assertEqual(OperatorDashboard._bno_orientation(session.sensor_fields, session.sensor_status_at, 3.1), ("STALE", None))
+        session.receive(BNO_REPORT.replace("age_ms=10", "age_ms=1900"), 3.1)
+        self.assertEqual(OperatorDashboard._bno_orientation(session.sensor_fields, session.sensor_status_at, 3.3), ("STALE", None))
+        session.receive(BNO_REPORT.replace("accuracy=3", "accuracy=0").replace("north_usable=YES", "north_usable=NO"), 3.4)
+        self.assertEqual(OperatorDashboard._bno_orientation(session.sensor_fields, session.sensor_status_at, 3.5),
+                         ("LIVE", (-9.989, 3.571, 301.8)))
+
+    def test_orientation_text_fits_existing_card_at_minimum_window_size(self):
+        screen = pygame.display.set_mode((820, 620))
+        dashboard = OperatorDashboard(pygame)
+        session, auto = ManualSession(), AutoSession()
+        for report in (BNO_REPORT.replace("accuracy=3", "accuracy=0"),
+                       BNO_REPORT.replace("heading=301.800", "heading=nan")):
+            session.receive(report, 1.9)
+            with mock.patch.object(dashboard, "_text", wraps=dashboard._text) as draw_text:
+                self.draw(screen, dashboard, session, auto)
+            # Existing BNO card at minimum size: x=416..604, y=126..214.
+            boxes = []
+            for call in draw_text.call_args_list:
+                _, font, value, pos, *_ = call.args
+                if 416 <= pos[0] < 604 and 126 <= pos[1] < 214:
+                    rect = pygame.Rect(pos, font.size(str(value)))
+                    self.assertLessEqual(rect.right, 604)
+                    self.assertLessEqual(rect.bottom, 214)
+                    self.assertFalse(any(rect.colliderect(other) for other in boxes))
+                    boxes.append(rect)
+            self.assertGreaterEqual(len(boxes), 3)
 
     def test_target_fields_support_editing_full_command_paste_and_enter(self):
         screen, dashboard, session, auto = self.make_dashboard()
@@ -75,7 +170,7 @@ class OperatorDashboardTests(unittest.TestCase):
     def test_dashboard_buttons_emit_existing_controller_action_names(self):
         screen, dashboard, session, auto = self.make_dashboard()
         self.draw(screen, dashboard, session, auto)
-        for name in ("track", "level", "north", "stop", "abort",
+        for name in ("track", "track_here", "level", "north", "stop", "abort",
                      "capture_a", "capture_b", "return_a", "play"):
             event = pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1,
                                        pos=dashboard.buttons[name].center)
@@ -88,8 +183,14 @@ class OperatorDashboardTests(unittest.TestCase):
         self.draw(screen, dashboard, session, auto)
         event = pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1,
                                    pos=dashboard.buttons["diagnostics"].center)
-        self.assertEqual(dashboard.handle_events([event]), ["diagnostics"])
+        self.assertEqual(dashboard.handle_events([event]), [])
         self.assertTrue(dashboard.show_diagnostics)
+        self.assertEqual((session.state, session.ready, auto.phase, auto.action), before)
+        self.draw(screen, dashboard, session, auto)
+        hide = pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1,
+                                  pos=dashboard.buttons["diagnostics"].center)
+        self.assertEqual(dashboard.handle_events([hide]), [])
+        self.assertFalse(dashboard.show_diagnostics)
         self.assertEqual((session.state, session.ready, auto.phase, auto.action), before)
 
     def test_layout_reflows_within_minimum_and_large_window_sizes(self):
@@ -121,8 +222,15 @@ class OperatorDashboardTests(unittest.TestCase):
         self.draw(screen, dashboard, session, auto)
         self.assertIn("CELESTIAL TRACKING ACTIVE", output)
         self.assertIn("ENCODER PROPAGATED / BNO DEGRADED", output)
-        self.assertIn("YAW OK", output)
-        self.assertIn("PITCH OK", output)
+        self.assertIn("ENC Y:OK  P:OK", output)
+
+    def test_carriage_position_is_as_prominent_as_yaw_and_pitch(self):
+        screen, dashboard, session, auto = self.make_dashboard()
+        output = []
+        dashboard.title = RecordingFont(dashboard.title, output)
+        session.receive("MANUAL_STATE carriage_steps=-123456", 1.9)
+        self.draw(screen, dashboard, session, auto)
+        self.assertIn("-123456", output)
 
     def test_low_accuracy_bno_and_bad_encoder_magnet_are_degraded(self):
         self.assertEqual(OperatorDashboard._health(

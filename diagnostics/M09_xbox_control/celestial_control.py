@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import queue
 import threading
 
-from celestial_coordinates import AstropyConverter, EquatorialTarget
+from celestial_coordinates import AstropyConverter, EquatorialTarget, HorizontalTarget
 
 UPDATE_INTERVAL = 1.0
 RESULT_MAX_AGE = 2.0
@@ -30,6 +30,7 @@ class Calculation:
     horizontal: object = None
     mount: object = None
     error: str = ""
+    target: object = None
 
 
 class CoordinateWorker:
@@ -50,7 +51,17 @@ class CoordinateWorker:
         mailbox.put_nowait(item)
 
     def submit(self, generation, target, now):
-        self._replace(self._jobs, (generation, target, now))
+        self._replace(self._jobs, ("target", generation, target, now))
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._run, name="celestial-coordinates", daemon=True)
+            self._thread.start()
+
+    def capture(self, generation, horizontal, now):
+        # Timestamp the pointing at the button press, before an optional first
+        # Astropy import can delay the worker's inverse transform.
+        captured = HorizontalTarget(horizontal.azimuth_deg, horizontal.altitude_deg,
+                                    self._utc_clock(), horizontal.warnings)
+        self._replace(self._jobs, ("capture", generation, captured, now))
         if self._thread is None:
             self._thread = threading.Thread(target=self._run, name="celestial-coordinates", daemon=True)
             self._thread.start()
@@ -71,14 +82,20 @@ class CoordinateWorker:
             job = self._jobs.get()
             if job is None:
                 return
-            generation, target, requested_at = job
+            kind, generation, value, requested_at = job
             try:
                 if converter is None:
                     converter = self._factory(self.observer)
-                utc = self._utc_clock()
-                horizontal = converter.altaz(target, utc)
+                if kind == "capture":
+                    utc = value.utc or self._utc_clock()
+                    horizontal = HorizontalTarget(value.azimuth_deg, value.altitude_deg, utc, value.warnings)
+                    target = converter.equatorial(horizontal, utc)
+                else:
+                    utc = self._utc_clock()
+                    target = value
+                    horizontal = converter.altaz(target, utc)
                 mount = self.reference.mount_target(horizontal)
-                result = Calculation(generation, requested_at, utc, horizontal, mount)
+                result = Calculation(generation, requested_at, utc, horizontal, mount, target=target)
             except Exception as error:
                 result = Calculation(generation, requested_at, error=f"{type(error).__name__}: {error}")
             self._replace(self._results, result)
@@ -95,10 +112,20 @@ class CelestialTracker:
         self.latest = None
         self.last_sent = None
         self.sequence = 0
+        self.capture_horizontal = None
 
     def begin(self, target, now):
         self.cancel()
         self.target = target
+        self.latest = None
+        self.last_sent = None
+        self.sequence = 0
+        self.capture_horizontal = None
+        self._request(now)
+
+    def begin_here(self, horizontal, now):
+        self.cancel()
+        self.capture_horizontal = horizontal
         self.latest = None
         self.last_sent = None
         self.sequence = 0
@@ -108,18 +135,28 @@ class CelestialTracker:
         self.generation += 1
         self.pending = False
         self.target = None
+        self.capture_horizontal = None
 
     def _request(self, now):
-        self.worker.submit(self.generation, self.target, now)
+        if self.target is None and self.capture_horizontal is not None:
+            self.worker.capture(self.generation, self.capture_horizontal, now)
+        else:
+            self.worker.submit(self.generation, self.target, now)
         self.pending = True
 
     def result(self, now):
         result = self.worker.poll()
-        if result is None or result.generation != self.generation or self.target is None:
+        if result is None or result.generation != self.generation or (
+                self.target is None and self.capture_horizontal is None):
             return None
         self.pending = False
         if result.error:
             raise ValueError(result.error)
+        if self.target is None:
+            if result.target is None:
+                raise ValueError("captured pointing did not produce a celestial target")
+            self.target = result.target
+            self.capture_horizontal = None
         if now - result.requested_at > RESULT_MAX_AGE:
             # Initialization can be slow. A new calculation uses current UTC;
             # never point using the timestamp from an old startup job.

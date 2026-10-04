@@ -182,6 +182,19 @@ class HeadingReference:
             raise ValueError(f"Target BNO pitch {pitch:.3f}deg reaches the existing +/-75deg pitch guard")
         return MountTarget(heading, pitch)
 
+    def horizontal_from_mount(self, heading_deg, pitch_deg, utc=None):
+        """Invert the existing optical/BNO mapping for a captured pointing."""
+        heading = _finite(heading_deg, "BNO heading")
+        pitch = _finite(pitch_deg, "BNO physical pitch")
+        if not 0 <= heading <= 360:
+            raise ValueError("BNO heading must be between 0 and 360 degrees")
+        if not -90 <= pitch <= 90:
+            raise ValueError("BNO physical pitch must be between -90 and 90 degrees")
+        azimuth = (self.heading_direction * heading + (self.magnetic_declination_deg or 0.0) +
+                   self.heading_offset_deg) % 360.0
+        altitude = pitch + self.pitch_offset_deg
+        return HorizontalTarget(azimuth, altitude, utc)
+
 
 def shortest_difference(target, current):
     """Same [-180, 180) convention as firmware; independent of motor signs."""
@@ -235,3 +248,18 @@ class AstropyConverter:
         if int(status) in (self._iers.TIME_BEFORE_IERS_RANGE, self._iers.TIME_BEYOND_IERS_RANGE):
             notes.append("UTC is outside bundled IERS coverage; pointing accuracy is degraded; update astropy-iers-data when online")
         return HorizontalTarget(float(horizontal.az.deg), float(horizontal.alt.deg), instant, tuple(notes))
+
+    def equatorial(self, horizontal, utc=None):
+        """Convert a captured local boresight into the fixed ICRS target to track."""
+        instant = utc_datetime(utc or horizontal.utc)
+        units = self._units
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            frame = self._AltAz(obstime=self._Time(instant, scale="utc"), location=self._location,
+                                pressure=0 * units.hPa)
+            local = self._SkyCoord(az=horizontal.azimuth_deg * units.deg,
+                                   alt=horizontal.altitude_deg * units.deg, frame=frame)
+            coordinate = local.icrs
+        # Warnings are surfaced by the normal forward calculation immediately
+        # after capture; the fixed target itself stays independent of UI state.
+        return EquatorialTarget(float(coordinate.ra.hour), float(coordinate.dec.deg))

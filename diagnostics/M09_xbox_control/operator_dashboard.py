@@ -1,6 +1,7 @@
 """Presentation-only pygame dashboard for the M09 host controller."""
 
 from dataclasses import dataclass
+import math
 import textwrap
 
 
@@ -151,10 +152,12 @@ class OperatorDashboard:
                     continue
                 action = next((name for name, rect in self.buttons.items() if rect.collidepoint(pos)), None)
                 if action:
-                    actions.append(action)
                     if action == "diagnostics":
                         self.toggle_diagnostics()
+                        # Diagnostics is presentation-only and never enters the
+                        # controller action stream.
                     else:
+                        actions.append(action)
                         self.blur_editor()
                     continue
                 if self.focused_field:
@@ -196,6 +199,36 @@ class OperatorDashboard:
         if available == "YES" and ((bno and fresh == "YES") or (not bno and valid == "YES")):
             return "OK", GREEN
         return "UNKNOWN", MUTED
+
+    @staticmethod
+    def _bno_orientation(fields, received_at, now):
+        """Read optional BNO_STATE angles for display only; never gate controls.
+
+        Current firmware declares physical_pitch as Euler PITCH and pitch_roll
+        as Euler roll. Do not substitute control targets or raw quaternions.
+        The two-second display timeout includes the sensor age at receipt.
+        """
+        if (received_at is None or fields.get("available") != "YES" or
+                fields.get("has_sample") != "YES" or fields.get("valid") == "NO"):
+            return "UNAVAILABLE", None
+        try:
+            age = float(fields["age_ms"]) / 1000.0
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return "UNAVAILABLE", None
+        if not math.isfinite(age) or age < 0:
+            return "UNAVAILABLE", None
+        if fields.get("fresh") == "NO" or age + max(0, now - received_at) > 2.0:
+            return "STALE", None
+        if fields.get("fresh") != "YES" or fields.get("pitch_axis") != "PITCH":
+            return "UNAVAILABLE", None
+        try:
+            angles = tuple(float(fields[key]) for key in ("physical_pitch", "pitch_roll", "heading"))
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return "UNAVAILABLE", None
+        if not all(math.isfinite(value) and lower <= value <= upper
+                   for value, (lower, upper) in zip(angles, ((-90, 90), (-180, 180), (0, 360)))):
+            return "UNAVAILABLE", None
+        return "LIVE", angles
 
     def _text(self, surface, font, value, pos, color=TEXT):
         surface.blit(font.render(str(value), True, color), pos)
@@ -278,16 +311,28 @@ class OperatorDashboard:
         self._text(screen, self.small, f"stick {pitch:+d}", (cards[1].right - 90, cards[1].y + 12), MUTED)
 
         bno_health, bno_color = self._health(session.sensor_fields, session.sensor_status_at, now, True)
-        self._text(screen, self.small, "BNO", (cards[2].x + 12, cards[2].y + 10), MUTED)
-        self._text(screen, self.font, bno_health, (cards[2].x + 12, cards[2].y + 38), bno_color)
-        self._text(screen, self.small, f"accuracy {session.sensor_fields.get('accuracy', '?')}",
-                   (cards[2].x + 12, cards[2].y + 65), MUTED)
+        orientation_status, angles = self._bno_orientation(session.sensor_fields, session.sensor_status_at, now)
+        self._text(screen, self.small, f"BNO {bno_health}", (cards[2].x + 12, cards[2].y + 6), bno_color)
+        if angles is not None:
+            for index, (label, angle) in enumerate(zip(("Pitch", "Roll", "Heading/yaw"), angles)):
+                self._text(screen, self.small, f"{label} {angle:.2f}\N{DEGREE SIGN}",
+                           (cards[2].x + 12, cards[2].y + 26 + index * 19))
+        else:
+            self._text(screen, self.font, orientation_status, (cards[2].x + 12, cards[2].y + 38), AMBER)
+        # Accuracy is informational even when too low for a north reference.
+        self._text(screen, self.small, f"acc {session.sensor_fields.get('accuracy', '?')}",
+                   (cards[2].right - 44, cards[2].y + 6), MUTED)
 
         enc_a, enc_a_color = self._health(session.encoder_fields.get("A", {}), session.encoder_status_at.get("A"), now)
         enc_b, enc_b_color = self._health(session.encoder_fields.get("B", {}), session.encoder_status_at.get("B"), now)
-        self._text(screen, self.small, "ENCODERS", (cards[3].x + 12, cards[3].y + 10), MUTED)
-        self._text(screen, self.font, f"YAW {enc_a}", (cards[3].x + 12, cards[3].y + 34), enc_a_color)
-        self._text(screen, self.font, f"PITCH {enc_b}", (cards[3].x + 12, cards[3].y + 59), enc_b_color)
+        carriage_value = session.carriage_steps if session.carriage_steps is not None else "?"
+        self._text(screen, self.small, "CARRIAGE STEPS", (cards[3].x + 12, cards[3].y + 7), MUTED)
+        self._text(screen, self.title, carriage_value, (cards[3].x + 12, cards[3].y + 28), TEXT)
+        compact_health = {"NO REPORT": "--", "DEGRADED": "WARN", "UNKNOWN": "?"}
+        encoder_summary = (f"ENC Y:{compact_health.get(enc_a, enc_a)}  "
+                           f"P:{compact_health.get(enc_b, enc_b)}")
+        encoder_color = RED if RED in (enc_a_color, enc_b_color) else (AMBER if AMBER in (enc_a_color, enc_b_color) else GREEN)
+        self._text(screen, self.small, encoder_summary, (cards[3].x + 12, cards[3].y + 67), encoder_color)
 
         celestial_y = cards_y + cards[0].height + gap
         celestial = pygame.Rect(margin, celestial_y, width - 2 * margin, 156)
@@ -303,14 +348,17 @@ class OperatorDashboard:
             self._text(screen, self.small, source, (celestial.x + 310, celestial.y + 16), AMBER if degraded else GREEN)
         self._text(screen, self.small, auto.celestial_status or "No active celestial target", (celestial.x + 14, celestial.y + 42), MUTED)
         field_y = celestial.y + 68
-        track_width = 158
+        track_width = 140
         field_gap = 10
-        available = celestial.width - 28 - track_width - field_gap
+        available = celestial.width - 28 - 2 * track_width - 2 * field_gap
         field_width = max(170, (available - field_gap) // 2)
         self._field(screen, "ra", "RIGHT ASCENSION (hours)", self.ra,
                     pygame.Rect(celestial.x + 14, field_y, field_width, 66))
         self._field(screen, "dec", "DECLINATION (degrees)", self.dec,
                     pygame.Rect(celestial.x + 14 + field_width + field_gap, field_y, field_width, 66))
+        self._button(screen, "track_here", "TRACK HERE",
+                     pygame.Rect(celestial.right - 2 * track_width - field_gap - 14,
+                                 field_y, track_width, 66), BLUE)
         self._button(screen, "track", "TRACK RA/DEC",
                      pygame.Rect(celestial.right - track_width - 14, field_y, track_width, 66), ACCENT)
 
@@ -348,6 +396,10 @@ class OperatorDashboard:
         if self.show_diagnostics:
             # A full overlay keeps verbose telemetry readable without growing
             # the ordinary dashboard or allowing it to run off-screen.
+            # Only overlay controls remain clickable. The visible Hide button
+            # overlaps the covered ABORT button at common window sizes.
+            self.buttons.clear()
+            self.fields.clear()
             overlay = pygame.Rect(margin, 40, width - 2 * margin, height - 40 - margin)
             self._panel(screen, overlay, (18, 23, 30))
             self._text(screen, self.title, "Diagnostics", (overlay.x + 16, overlay.y + 12), TEXT)

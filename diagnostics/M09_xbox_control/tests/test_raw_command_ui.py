@@ -218,21 +218,29 @@ class RawCommandUiTests(unittest.TestCase):
                 self.assertEqual(writes[-1][1], b"X\n")
                 self.assertIn("TX_ATTEMPT X", log)
 
-    def test_exit_and_focus_loss_win_over_enter_without_automatic_submission(self):
-        for event in (key(pygame.K_ESCAPE), pygame.event.Event(pygame.QUIT),
-                      pygame.event.Event(pygame.WINDOWFOCUSLOST)):
+    def test_exit_wins_over_enter_without_automatic_submission(self):
+        for event in (key(pygame.K_ESCAPE), pygame.event.Event(pygame.QUIT)):
             with self.subTest(event=event):
                 result, writes, raw, _, _ = self.run_ui([
                     (1.15, [text("POSE 20 8 -154"), key(pygame.K_RETURN), event]),
-                    (1.5, [pygame.event.Event(pygame.WINDOWFOCUSGAINED)]),
                 ])
                 self.assertEqual(result, 0)
                 self.assertEqual(raw, [])
                 self.assertEqual(writes[-1][1], b"\nSTOP\n")
                 self.assert_no_jog_after(writes)
 
-        # Lose focus after firmware has accepted a POSE and is still BUSY.
-        # This must cancel motion even though no manual JOG lease is active.
+    def test_focus_changes_leave_raw_command_and_motion_unchanged(self):
+        result, writes, raw, session, _ = self.run_ui([
+            (1.15, [text("POSE 20 8 -154"), key(pygame.K_RETURN),
+                    pygame.event.Event(pygame.WINDOWFOCUSLOST)]),
+            (1.5, [pygame.event.Event(pygame.WINDOWFOCUSGAINED)]),
+        ])
+        self.assertEqual(result, 0)
+        self.assertEqual([data for _, data in raw], [b"POSE 20 8 -154\n"])
+        self.assertFalse(any(1.15 <= at < 1.5 and data == b"STOP\n" for at, data in writes))
+        self.assertTrue(session.raw_mode)
+
+        # Focus changes after firmware accepts a POSE also leave it alone.
         result, writes, raw, session, _ = self.run_ui([
             (1.15, [text("POSE 20 8 -154"), key(pygame.K_RETURN)]),
             (1.25, [pygame.event.Event(pygame.WINDOWFOCUSLOST)]),
@@ -240,7 +248,7 @@ class RawCommandUiTests(unittest.TestCase):
         ])
         self.assertEqual(result, 0)
         self.assertEqual([data for _, data in raw], [b"POSE 20 8 -154\n"])
-        self.assertTrue(any(1.25 <= at < 1.3 and data == b"STOP\n" for at, data in writes))
+        self.assertFalse(any(1.25 <= at < 1.6 and data == b"STOP\n" for at, data in writes))
         self.assertTrue(session.raw_mode)
         self.assert_no_jog_after(writes)
 

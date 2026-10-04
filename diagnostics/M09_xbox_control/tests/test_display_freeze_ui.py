@@ -175,19 +175,30 @@ class DisplayFreezeUiTests(unittest.TestCase):
         self.assertFalse(any(at >= .6 and data.startswith(b"JOG ") for at, data in writes))
         self.assertTrue(all("DISPLAY FROZEN" in rows[0] for at, rows in frames if 0.8 <= at < 1.3))
 
-    def test_stop_abort_focus_and_exit_remain_effective_while_frozen(self):
+    def test_stop_abort_and_exit_remain_effective_while_frozen(self):
         for raw in (False, True):
             for event, abort in ((key(pygame.K_SPACE), False), (key(pygame.K_F12), False),
                                  (key(pygame.K_x), True),
                                  (pygame.event.Event(pygame.JOYBUTTONDOWN, instance_id=42, button=1), True),
-                                 (key(pygame.K_ESCAPE), False),
-                                 (pygame.event.Event(pygame.WINDOWFOCUSLOST), False)):
+                                 (key(pygame.K_ESCAPE), False)):
                 with self.subTest(raw=raw, event=event):
                     result, writes, _, _, _ = self.run_ui([(1.0, [event])], raw=raw)
                     self.assertEqual(result, int(abort))
                     self.assertTrue(any(1.0 <= at < 1.03 and
                                         (data == b"X\n" if abort else b"STOP" in data) for at, data in writes))
                     self.assertFalse(any(at >= 1.0 and data.startswith(b"JOG ") for at, data in writes))
+
+    def test_focus_change_does_not_stop_frozen_dashboard_or_generate_input(self):
+        focus_events = [pygame.event.Event(pygame.WINDOWFOCUSLOST),
+                        pygame.event.Event(pygame.JOYAXISMOTION, instance_id=42, axis=0, value=1.0),
+                        pygame.event.Event(pygame.WINDOWFOCUSGAINED)]
+        for raw in (False, True):
+            with self.subTest(raw=raw):
+                result, writes, _, _, _ = self.run_ui([(1.0, focus_events)], raw=raw)
+                self.assertEqual(result, 0)
+                self.assertFalse(any(1.0 <= at < 1.3 and data.strip() == b"STOP" for at, data in writes))
+                if not raw:
+                    self.assertTrue(any(at >= 1.0 and data.startswith(b"JOG ") for at, data in writes))
 
     def test_dry_run_freeze_never_opens_serial(self):
         result, _, frames, _, _ = self.run_ui(dry_run=True)

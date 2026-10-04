@@ -1,5 +1,6 @@
 ﻿"""Single-request manual/keyframe workflow; no pygame, serial or hardware access."""
 from dataclasses import dataclass
+import math
 from celestial_control import CelestialTracker, parse_tracking_command, RESULT_MAX_AGE
 
 
@@ -34,6 +35,7 @@ class AutoSession:
         self.celestial_ready = False
         self.celestial_status = ""
         self.celestial_feedback = ""
+        self.celestial_source = ""
 
     def configure_celestial(self, observer, reference):
         if self.celestial is not None:
@@ -49,6 +51,7 @@ class AutoSession:
         if not centered:
             raise ValueError("Center sticks for 0.5 s before celestial GOTO.")
         self.celestial_status = f"RA={target.ra_hours:.6f} h Dec={target.dec_deg:+.6f} deg"
+        self.celestial_source = "RA/DEC"
         if dry_run:
             self.note = "Celestial dry run: " + self.celestial_status + "; no motion or coordinate calculation."
             return None
@@ -62,6 +65,60 @@ class AutoSession:
         self.last_rx = now
         self.deadline = now + 15.0
         self.note = "Preparing current sky position; waiting for stopped READY."
+        return self._command("STOP")
+
+    def request_track_here(self, now, centered, sensor_fields, sensor_received_at, dry_run=False):
+        """Capture the current BNO boresight and enter the existing sky tracker."""
+        if self.celestial is None:
+            raise ValueError("TRACK HERE needs valid --latitude and --longitude settings; manual remains available.")
+        if not dry_run and (not self.enabled or self.phase != "READY"):
+            raise ValueError("Wait for READY before TRACK HERE; request was not queued.")
+        if not centered:
+            raise ValueError("Center sticks for 0.5 s before TRACK HERE.")
+        fields = sensor_fields or {}
+        if sensor_received_at is None:
+            raise ValueError("TRACK HERE needs a recent BNO orientation report; manual remains available.")
+        required = (("available", "YES"), ("has_sample", "YES"), ("fresh", "YES"),
+                    ("north_usable", "YES"), ("pitch_axis", "PITCH"))
+        failed = [name for name, expected in required if fields.get(name) != expected]
+        if failed:
+            raise ValueError("TRACK HERE needs fresh, north-qualified BNO heading and physical pitch "
+                             f"({', '.join(failed)} unavailable); manual remains available.")
+        try:
+            sample_age = float(fields["age_ms"]) / 1000.0
+            receipt_age = max(0.0, now - float(sensor_received_at))
+            heading = float(fields["heading"])
+            pitch = float(fields["physical_pitch"])
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            raise ValueError("TRACK HERE received invalid BNO orientation telemetry; manual remains available.") from error
+        if (not all(math.isfinite(value) for value in (sample_age, receipt_age, heading, pitch)) or
+                sample_age < 0 or sample_age + receipt_age > 2.0):
+            raise ValueError("TRACK HERE BNO orientation is stale or invalid; manual remains available.")
+        try:
+            horizontal = self.celestial.reference.horizontal_from_mount(heading, pitch)
+            self.celestial.reference.mount_target(horizontal)  # Existing horizon and pitch guards.
+        except ValueError as error:
+            raise ValueError(f"TRACK HERE cannot use the current pointing: {error}; manual remains available.") from error
+        self.celestial_status = (f"TRACK HERE captured Alt={horizontal.altitude_deg:.3f} "
+                                 f"Az={horizontal.azimuth_deg:.3f} deg | resolving RA/Dec")
+        self.celestial_source = "TRACK HERE"
+        if dry_run:
+            self.note = "Celestial dry run: " + self.celestial_status + "; no motion or coordinate calculation."
+            return None
+        try:
+            self.celestial.begin_here(horizontal, now)
+        except Exception as error:
+            self.celestial.cancel()
+            raise ValueError(f"TRACK HERE could not start: {error}; manual remains available.") from error
+        self._new_request("celestial", "CELESTIAL_PREPARING", now)
+        self.action = "celestial"
+        self.raw_command = None
+        self.continuation = None
+        self.celestial_ready = False
+        self.celestial_feedback = ""
+        self.last_rx = now
+        self.deadline = now + 15.0
+        self.note = "Captured current pointing; resolving its sky target and waiting for stopped READY."
         return self._command("STOP")
 
     def celestial_display_lines(self):
@@ -393,7 +450,8 @@ class AutoSession:
 
     def _describe_celestial(self, result):
         target = self.celestial.target
-        self.celestial_status = (f"RA={target.ra_hours:.6f} h Dec={target.dec_deg:+.6f} deg | "
+        prefix = "TRACK HERE | " if self.celestial_source == "TRACK HERE" else ""
+        self.celestial_status = (f"{prefix}RA={target.ra_hours:.6f} h Dec={target.dec_deg:+.6f} deg | "
                                  f"Alt={result.horizontal.altitude_deg:.3f} Az={result.horizontal.azimuth_deg:.3f} deg | "
                                  f"UTC={result.utc.isoformat(timespec='seconds')}")
         if result.horizontal.warnings:

@@ -17,7 +17,7 @@ import pygame
 import serial
 import xbox_control
 from celestial_control import Calculation
-from celestial_coordinates import HorizontalTarget
+from celestial_coordinates import EquatorialTarget, HorizontalTarget
 
 
 TARGET = "TRACK_RADEC 18:36:56.3 +38:47:01"
@@ -32,6 +32,26 @@ def submit(value=TARGET):
 
 
 class CelestialUiTests(unittest.TestCase):
+    def test_bno_display_failures_leave_celestial_serial_stream_unchanged(self):
+        baseline = self.run_ui([(1.4, submit())], until=4.6, real_session=True)
+        def invalid(port):
+            port.rx += (b"BNO_STATE available=YES has_sample=YES fresh=YES age_ms=10 "
+                        b"accuracy=3 heading=nan physical_pitch=oops pitch_axis=PITCH pitch_roll=inf\n")
+        def disconnected(port):
+            port.rx += b"BNO_STATE available=NO has_sample=NO fresh=NO age_ms=4294967295\n"
+        def stale(port):
+            port.rx += (b"BNO_STATE available=YES has_sample=YES fresh=NO age_ms=4000 "
+                        b"accuracy=0 heading=123 physical_pitch=12 pitch_axis=PITCH pitch_roll=-5\n")
+        result, writes, _, _, auto, rows, _ = self.run_ui(
+            [(1.0, invalid), (1.4, submit()), (2.0, disconnected), (2.6, stale)],
+            until=4.6, real_session=True)
+        self.assertEqual(result, 0)
+        self.assertEqual(writes, baseline[1])
+        self.assertEqual(auto.phase, "CELESTIAL_TRACK")
+        self.assertTrue(any(data.startswith(b"CELESTIAL_UPDATE ") for _, data in writes))
+        self.assertIn("UNAVAILABLE", rows)
+        self.assertIn("STALE", rows)
+
     def run_ui(self, actions=(), *, until=3.0, dry_run=False, config=None,
                real_session=False, worker_error=None, gui_entry=False):
         class Clock:
@@ -96,6 +116,11 @@ class CelestialUiTests(unittest.TestCase):
                 utc = datetime(2026, 10, 1, tzinfo=timezone.utc)
                 horizontal = HorizontalTarget(100 + now * .004, 30 + now * .002, utc)
                 self.result = Calculation(generation, now, utc, horizontal, self.reference.mount_target(horizontal))
+            def capture(self, generation, horizontal, now):
+                utc = datetime(2026, 10, 1, tzinfo=timezone.utc)
+                target = EquatorialTarget(5.25, 22.5)
+                self.result = Calculation(generation, now, utc, horizontal,
+                                          self.reference.mount_target(horizontal), target=target)
             def poll(self):
                 value, self.result = self.result, None
                 return value
@@ -240,12 +265,65 @@ class CelestialUiTests(unittest.TestCase):
 
     def test_safety_batch_prevents_celestial_start(self):
         for event in (key(pygame.K_SPACE), key(pygame.K_F12), key(pygame.K_F2),
-                      key(pygame.K_x), pygame.event.Event(pygame.WINDOWFOCUSLOST),
+                      key(pygame.K_x),
                       pygame.event.Event(pygame.JOYBUTTONDOWN, instance_id=42, button=1)):
             with self.subTest(event=event):
                 _, writes, requests, _, _, _, _ = self.run_ui([(1.4, submit() + [event])])
                 self.assertEqual(requests, [])
                 self.assertFalse(any(data == b"CELESTIAL_TEST_UPDATE\n" for _, data in writes))
+
+    def test_focus_loss_and_regain_do_not_change_tracking_or_create_takeover(self):
+        baseline = self.run_ui([(1.4, submit())], until=4.2, real_session=True)
+        focus = [pygame.event.Event(pygame.WINDOWFOCUSLOST),
+                 pygame.event.Event(pygame.JOYAXISMOTION, instance_id=42, axis=0, value=1.0)]
+        regain = [pygame.event.Event(pygame.WINDOWFOCUSGAINED)]
+        result, writes, _, session, auto, _, log = self.run_ui(
+            [(1.4, submit()), (2.5, focus), (3.0, regain)], until=4.2, real_session=True)
+        self.assertEqual(result, 0)
+        self.assertEqual(writes, baseline[1])
+        self.assertEqual(auto.phase, "CELESTIAL_TRACK")
+        self.assertTrue(session.auto_mode)
+        self.assertIn("focus lost; controller mode unchanged", log)
+        self.assertIn("focus gained; controller mode unchanged", log)
+
+    def test_hide_diagnostics_is_ui_only_while_tracking(self):
+        baseline = self.run_ui([(1.4, submit())], until=3.6, real_session=True)
+        click = lambda pos: pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=pos)
+        result, writes, _, _, auto, rows, _ = self.run_ui(
+            [(1.4, submit()), (2.4, [click((997, 532))]), (2.7, [click((997, 69))])],
+            until=3.6, real_session=True)
+        self.assertEqual(result, 0)
+        self.assertEqual(writes, baseline[1])
+        self.assertEqual(auto.phase, "CELESTIAL_TRACK")
+        self.assertTrue(any("Diagnostics" in row for row in rows))
+
+    def test_track_here_button_captures_current_pointing_and_tracks(self):
+        def orientation(port):
+            port.rx += (b"BNO_STATE available=YES has_sample=YES fresh=YES age_ms=10 accuracy=3 "
+                        b"north_usable=YES heading=100 physical_pitch=30 pitch_axis=PITCH pitch_roll=2\n")
+        result, writes, _, session, auto, rows, log = self.run_ui(
+            [(.9, orientation), (1.4, [pygame.event.Event(
+                pygame.MOUSEBUTTONDOWN, button=1, pos=(850, 327))])],
+            until=3.4, real_session=True, gui_entry=True)
+        self.assertEqual(result, 0)
+        self.assertEqual(auto.phase, "CELESTIAL_TRACK")
+        self.assertIn("TRACK HERE | RA=5.250000 h Dec=+22.500000 deg", auto.celestial_status)
+        self.assertTrue(any(data.startswith(b"CELESTIAL_GOTO ") for _, data in writes))
+        self.assertTrue(any("TRACK HERE" in row for row in rows))
+        self.assertIn("CELESTIAL_REQUEST TRACK HERE captured", log)
+        self.assertTrue(session.auto_mode)
+
+    def test_track_here_missing_orientation_reports_failure_and_manual_continues(self):
+        click_here = pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=(850, 327))
+        result, writes, _, session, auto, rows, log = self.run_ui(
+            [(1.4, [click_here]), (1.8, lambda port: port.axes.__setitem__(1, -.8))],
+            until=2.3, real_session=True, gui_entry=True)
+        self.assertEqual(result, 0)
+        self.assertEqual(auto.phase, "READY")
+        self.assertTrue(any(at >= 1.8 and data == b"JOG 0 585 0\n" for at, data in writes))
+        self.assertTrue(any("TRACK HERE needs" in row for row in rows))
+        self.assertIn("CELESTIAL_NOT_SENT TRACK HERE needs", log)
+        self.assertEqual(session.state, "active")
 
     def test_goto_and_track_stop_cancel_future_updates(self):
         for at in (1.8, 2.4):

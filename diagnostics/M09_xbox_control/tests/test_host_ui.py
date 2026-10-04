@@ -155,7 +155,7 @@ class HostUiTests(unittest.TestCase):
                 self.assertEqual(writes[-1], b"\nSTOP\n")
                 self.assertNotIn(b"X\n", writes)
                 self.assertEqual(result, 1 if scenario in ("disconnect", "input_error", "interrupt", "serial_error") else 0)
-            if scenario in ("focus", "reject", "firmware_fault", "long_pause"):
+            if scenario in ("reject", "firmware_fault", "long_pause"):
                 self.assertFalse(any(stamp > 0.9 and data.startswith(b"JOG")
                                      for stamp, data in zip(write_times, writes)))
             if scenario in ("pause", "telemetry", "overflow"):
@@ -165,6 +165,11 @@ class HostUiTests(unittest.TestCase):
             if scenario == "telemetry":
                 self.assertTrue(any(stamp > 1.9 and data.startswith(b"JOG") and int(data.split()[1]) > 0
                                     for stamp, data in zip(write_times, writes)))
+            if scenario == "focus":
+                self.assertTrue(any(0.9 < stamp < 1.0 and data.startswith(b"JOG ") and int(data.split()[3]) > 0
+                                    for stamp, data in zip(write_times, writes)))
+                self.assertFalse(any(0.9 < stamp < 1.3 and data.strip() == b"STOP"
+                                     for stamp, data in zip(write_times, writes)))
 
     def test_dry_run_never_opens_serial(self):
         self.run_ui("dry_run")
@@ -175,7 +180,7 @@ class HostUiTests(unittest.TestCase):
     def test_disconnect_sends_stop_without_latched_abort(self):
         self.run_ui("disconnect")
 
-    def test_focus_loss_stops_and_does_not_resume_after_focus_returns(self):
+    def test_focus_loss_and_regain_leave_manual_stream_running(self):
         self.run_ui("focus")
 
     def test_host_pause_below_command_lease_reads_current_input_and_continues(self):

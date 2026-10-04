@@ -130,6 +130,15 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual(HeadingReference(-10).mount_target(HorizontalTarget(355, 25)).heading_deg, 5)
         self.assertIn("configured true-north", HeadingReference(0).describe())
 
+    def test_mount_to_horizontal_is_the_exact_inverse_used_by_track_here(self):
+        for reference in (HeadingReference(), HeadingReference(12.5, -7.25, 3.5, -1)):
+            for azimuth, altitude in ((0, 0), (123.456, 42.25), (359.9, 12.5)):
+                horizontal = HorizontalTarget(azimuth, altitude)
+                mount = reference.mount_target(horizontal)
+                captured = reference.horizontal_from_mount(mount.heading_deg, mount.pitch_deg)
+                self.assertAlmostEqual(captured.azimuth_deg, azimuth)
+                self.assertAlmostEqual(captured.altitude_deg, altitude)
+
     def test_shortest_wrap_crossings_both_directions(self):
         self.assertAlmostEqual(shortest_difference(0.1, 359.9), 0.2)
         self.assertAlmostEqual(shortest_difference(359.9, 0.1), -0.2)
@@ -211,6 +220,13 @@ class AstropyConversionTests(unittest.TestCase):
             connect.assert_not_called()
         from astropy.utils import iers
         self.assertFalse(iers.conf.auto_download)
+
+    def test_captured_altaz_round_trips_through_fixed_icrs_target(self):
+        original = HorizontalTarget(218.25, 37.5, self.start)
+        target = self.converter.equatorial(original, self.start)
+        restored = self.converter.altaz(target, self.start)
+        self.assertAlmostEqual(restored.azimuth_deg, original.azimuth_deg, places=7)
+        self.assertAlmostEqual(restored.altitude_deg, original.altitude_deg, places=7)
 
     def test_outside_bundled_iers_coverage_has_explicit_diagnostic(self):
         point = self.converter.altaz(self.target, "2100-01-01T00:00:00Z")

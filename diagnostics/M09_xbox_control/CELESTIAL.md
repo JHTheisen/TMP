@@ -50,6 +50,29 @@ RA is normalized modulo 24 hours; Dec must be in [-90,90] degrees. These are
 ICRS catalog coordinates, not apparent RA/Dec of date. This version has no name
 resolver or solar-system ephemeris target interface.
 
+To track an object without knowing its coordinates, use the normal joystick to
+center the visible star, Moon, or other object in the camera. Release all three
+assigned axes and leave them centered for 0.5 seconds, then click **TRACK HERE**.
+The host captures the current reported BNO heading and physical pitch, maps them
+to optical Alt/Az with the reference settings below, converts that instant to a
+fixed ICRS RA/Dec target on the astronomy worker, and uses the same existing
+CELESTIAL_GOTO/CELESTIAL_TRACK path. The panel identifies the target as TRACK HERE
+and displays its captured RA/Dec. Clicking the Camera app, Alt-Tab, minimizing, or
+showing/hiding diagnostics does not stop tracking. Deliberate stick movement,
+STOP, abort, controller failure, or an applicable motion/sensor fault still does.
+
+TRACK HERE requires configured observer latitude/longitude and a BNO report that
+is recent, valid, and `north_usable=YES`. It refuses stale/missing alignment with
+a visible reason while leaving MANUAL available. With no configured magnetic
+declination the displayed reference explicitly remains a raw magnetic-north
+approximation. Accurate absolute coordinates and longer retention require verified
+heading direction, declination, camera boresight offsets, base attitude, host time,
+and observer location; the software does not invent those alignments.
+The captured target is a fixed ICRS/sidereal direction. The button cannot infer
+that a centered object is the Moon, a planet, satellite, or comet, so it cannot
+apply that object's independent ephemeris motion; such an object will slowly drift
+relative to the captured sidereal direction.
+
 The live celestial panel and session log show normalized RA/Dec, UTC, observer,
 reference settings, computed Alt/Az, state, commanded BNO targets and pointing
 errors. Actual heading/pitch remain in the existing BNO panel. F3 freezes only
@@ -198,9 +221,10 @@ After Jeff separately installs the new firmware:
 4. Check location, elevation and the displayed UTC against the host clock. Verify
    optical/BNO heading direction and offsets, then restart with verified settings.
 5. Identify a visible bright target, preferably well above the horizon and away
-   from the zenith. Use its ICRS RA/Dec; the Vega example is conditional on visibility.
-6. Center sticks, F2, wait READY, enter `TRACK_RADEC` using Tab separators and Enter.
-   Watch the initial slew; check Alt/Az and both BNO errors approach the targets.
+   from the zenith. Manually center it in the camera, release the sticks for 0.5
+   seconds, then click **TRACK HERE**. No RA/Dec entry is required.
+6. Watch the captured RA/Dec and the transition through GOTO to TRACK. Separately
+   test the existing RA/Dec fields or F2 `TRACK_RADEC` path with a known target.
 7. Confirm automatic transition from CELESTIAL_GOTO to CELESTIAL_TRACK. Center the
    phone/camera optical alignment on the target; using the sticks cancels tracking,
    so re-enter the target if mechanical recentering was needed.

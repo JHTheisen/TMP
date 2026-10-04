@@ -1,7 +1,7 @@
 # M09 Xbox manual control
 
-Celestial RA/Dec GOTO and persistent alt-az tracking are available from the
-operator dashboard (with F2 retained as a development shortcut):
+Celestial RA/Dec GOTO, point-here capture, and persistent alt-az tracking are
+available from the operator dashboard (with F2 retained as a development shortcut):
 `TRACK_RADEC <RA hours or hh:mm:ss> <Dec degrees or +/-dd:mm:ss>`.
 See [celestial setup, reference settings, behavior and first physical test](CELESTIAL.md).
 The feature extends the physically tested `a8c85a1` baseline; its physical
@@ -166,8 +166,9 @@ Deliberate stick displacement outside the existing deadband cancels the sequence
 sends STOP, waits for stopped READY and the zero-JOG acknowledgment, then applies
 the current live stick value without requiring centering or a mode change.
 This is braking plus protocol latency, not an abrupt motor-direction reversal.
-Noise within deadband does not cancel motion. Explicit STOP, focus loss and F2
-cancel pending continuations and clear this takeover permission.
+Noise within deadband does not cancel motion. Explicit STOP and F2 cancel pending
+continuations and clear this takeover permission. Window focus and minimize/restore
+events do not alter manual or autonomous state.
 
 Play first obtains a fresh stopped snapshot. If away from A it uses `KEYRETURN`,
 which has its own travel time independent of the selected playback duration.
@@ -250,8 +251,9 @@ occurs. No homing, absolute carriage measurement or learned gearbox ratio is add
 
 STOP uses native travel braking acceleration and the three-second forced-stop
 fallback. Motor/API faults, wrong endpoints and deadline failures stop playback;
-BNO quality does not. Host focus loss/disconnection requests STOP. A broken serial
-link cannot guarantee delivery; the 250 ms manual JOG lease is not a KEYMOVE lease.
+BNO quality does not. Controller disconnection requests STOP; window focus changes
+do not. A broken serial link cannot guarantee delivery; the 250 ms manual JOG lease
+is not a KEYMOVE lease.
 
 First supervised validation after a separately authorized upload:
 1. Run host `--dry-run` to check buttons and the new default workflow.
@@ -274,7 +276,8 @@ No upload or physical motion was performed during this implementation.
 It can be moved, resized, maximized and restored; the layout has an 820x620
 minimum working size. The compact view shows the current firmware/automatic mode,
 manual or autonomous state, measured yaw and pitch, BNO health, both AS5600 health
-states, controller/serial status, and the current celestial target. Active
+states, a large startup-relative carriage-step readout, controller/serial status,
+and the current celestial target. Active
 celestial tracking is highlighted. When celestial feedback has fallen back to
 the encoders, the dashboard explicitly shows **ENCODER PROPAGATED / BNO DEGRADED**.
 
@@ -283,6 +286,15 @@ RA/DEC**. The fields support cursor editing, selection, Ctrl+A and Ctrl+V. Pasti
 either `18:36:56.3 +38:47:01` or the complete `TRACK_RADEC ...` command fills both
 fields. The dashboard calls the same host-managed celestial request path used by
 F2; it does not send `TRACK_RADEC` directly to firmware.
+
+For a target already centered in the camera, release and center all sticks for
+0.5 seconds, then click **TRACK HERE**. The host requires a recent, north-qualified
+BNO heading/physical-pitch report, converts the current boresight through the same
+declination/direction/optical-offset mapping used by RA/Dec tracking, resolves that
+local Alt/Az to a fixed ICRS RA/Dec target on the background worker, and enters the
+existing celestial GOTO/TRACK lifecycle. The captured RA/Dec, current Alt/Az and
+TRACK HERE source remain visible. A missing observer location or usable orientation
+produces a dashboard reason and leaves manual control running.
 
 LEVEL, NORTH, STOP, latched ABORT, keyframe capture A/B, return A and play A-to-B
 are available as buttons. These buttons call the existing `AutoSession` and
@@ -305,7 +317,8 @@ toggle it repeatedly. The control status and raw-command editor remain live.
 
 This pauses only displayed diagnostic text, not motion or communication. Serial
 reception, sensor processing, existing logging, STATUS polling, joystick commands,
-F2, STOP/abort and focus-loss handling continue normally. New responses are still
+F2 and STOP/abort handling continue normally. Window focus changes do not affect
+controller mode. New responses are still
 processed and logged under the existing logging policy while hidden by the
 snapshot; unfreezing shows the latest response tail, without replaying a backlog.
 
@@ -330,9 +343,10 @@ NORTH or keyframe motion cancels it, leaves the editor, waits for stopped READY,
 then performs the existing zero-JOG handshake and honors current manual input.
 Idle command editing never generates JOG. **Space or F12** sends STOP; **X or Xbox B** keeps
 the existing latched-abort-and-exit behavior. **Esc/close** sends STOP and exits.
-Focus loss also requests STOP. These safety actions take priority over an Enter
-queued in the same input batch. Command text is accepted only in the explicit
-focused editor; Xbox buttons are never text.
+Changing application focus or minimizing the dashboard leaves manual and autonomous
+state unchanged, so the Windows Camera app can remain active alongside tracking.
+Safety actions take priority over an Enter queued in the same input batch. Command
+text is accepted only in the explicit editor; Xbox buttons are never text.
 
 `TRACK_RADEC` is the one host-managed exception to persistent raw mode. A valid
 celestial request leaves F2 immediately, before preparation/GOTO begins, so its

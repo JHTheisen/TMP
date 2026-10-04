@@ -8,7 +8,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from auto_control import AutoSession
 from celestial_control import Calculation, CoordinateWorker, parse_tracking_command
-from celestial_coordinates import Observer, HeadingReference, HorizontalTarget
+from celestial_coordinates import EquatorialTarget, Observer, HeadingReference, HorizontalTarget
 from xbox_control import ManualSession
 
 
@@ -17,11 +17,14 @@ UTC = datetime(2026, 10, 1, tzinfo=timezone.utc)
 
 class FakeWorker:
     def __init__(self):
-        self.jobs, self.results = [], []
+        self.jobs, self.captures, self.results = [], [], []
         self.closed = False
 
     def submit(self, generation, target, now):
         self.jobs.append((generation, target, now))
+
+    def capture(self, generation, horizontal, now):
+        self.captures.append((generation, horizontal, now))
 
     def poll(self):
         return self.results.pop(0) if self.results else None
@@ -81,6 +84,52 @@ class CelestialControlTests(unittest.TestCase):
         self.assertIsNone(self.auto.request_celestial("TRACK_RADEC 1 -30", 0, True, dry_run=True))
         self.assertFalse(self.worker.jobs)
         self.assertIsNone(self.auto.action)
+
+    def test_track_here_captures_mount_pointing_then_uses_existing_tracker(self):
+        fields = {"available": "YES", "has_sample": "YES", "fresh": "YES", "north_usable": "YES",
+                  "pitch_axis": "PITCH", "age_ms": "10", "heading": "100", "physical_pitch": "30"}
+        self.assertEqual(self.auto.request_track_here(1, True, fields, .95), b"STOP\n")
+        self.assertEqual(len(self.worker.captures), 1)
+        generation, horizontal, requested_at = self.worker.captures[0]
+        self.assertEqual((horizontal.azimuth_deg, horizontal.altitude_deg), (105, 30))
+        target = EquatorialTarget(5.25, 22.5)
+        mount = self.reference.mount_target(horizontal)
+        self.worker.results.append(Calculation(
+            generation, requested_at, UTC, horizontal, mount, target=target))
+        self.auto.receive("M09 READY", 1.01)
+        self.assertEqual(self.auto.frame(1.02), b"CELESTIAL_GOTO 1 100.000000 30.000000\n")
+        self.assertIn("TRACK HERE | RA=5.250000 h Dec=+22.500000 deg", self.auto.celestial_status)
+        self.auto.receive("CELESTIAL_ACCEPTED id=1 deadline_ms=90000", 1.03)
+        self.auto.receive("CELESTIAL_TRACK id=1", 1.1)
+        self.assertEqual(self.auto.phase, "CELESTIAL_TRACK")
+
+    def test_track_here_rejects_missing_alignment_without_affecting_manual(self):
+        valid = {"available": "YES", "has_sample": "YES", "fresh": "YES", "north_usable": "YES",
+                 "pitch_axis": "PITCH", "age_ms": "10", "heading": "100", "physical_pitch": "30"}
+        cases = [(None, None), ({**valid, "north_usable": "NO"}, .9),
+                 ({**valid, "fresh": "NO"}, .9), ({**valid, "heading": "nan"}, .9),
+                 ({**valid, "age_ms": "3000"}, .9)]
+        for fields, received_at in cases:
+            with self.subTest(fields=fields), self.assertRaisesRegex(ValueError, "TRACK HERE"):
+                self.auto.request_track_here(1, True, fields, received_at)
+            self.assertEqual(self.auto.phase, "READY")
+            self.assertFalse(self.worker.captures)
+        manual = ManualSession()
+        manual.receive("M09 READY", 1)
+        self.assertTrue(manual.arm(1.1, True))
+        self.assertEqual(manual.frame(1.1, 0, 0, 0), b"JOG 0 0 0\n")
+        manual.receive("MANUAL READY: fixture", 1.11)
+        self.assertEqual(manual.frame(1.12, 100, -50, 25), b"JOG 100 -50 25\n")
+
+    def test_track_here_worker_start_failure_is_local(self):
+        fields = {"available": "YES", "has_sample": "YES", "fresh": "YES", "north_usable": "YES",
+                  "pitch_axis": "PITCH", "age_ms": "10", "heading": "100", "physical_pitch": "30"}
+        self.worker.capture = lambda *args: (_ for _ in ()).throw(RuntimeError("worker unavailable"))
+        with self.assertRaisesRegex(ValueError, "worker unavailable"):
+            self.auto.request_track_here(1, True, fields, .99)
+        self.assertEqual(self.auto.phase, "READY")
+        self.assertIsNone(self.auto.action)
+        self.assertIsNone(self.auto.celestial.target)
 
     def test_initial_result_waits_for_ready_and_blocks_manual(self):
         self.start()
@@ -285,6 +334,34 @@ class CoordinateWorkerTests(unittest.TestCase):
             self.assertEqual(result.utc, UTC)
             self.assertEqual(result.mount.heading_deg, 95)
             self.assertEqual(result.mount.pitch_deg, 40)
+        finally:
+            worker.close()
+
+    def test_worker_resolves_captured_horizontal_to_fixed_target(self):
+        done = threading.Event()
+        target = EquatorialTarget(5.25, 22.5)
+        class Converter:
+            def __init__(self, observer):
+                pass
+            def equatorial(self, horizontal, utc):
+                self.horizontal, self.utc = horizontal, utc
+                return target
+        reference = HeadingReference(5, 1, 2)
+        worker = CoordinateWorker(Observer(42, -83), reference, Converter, lambda: UTC)
+        original = worker._replace
+        def replace(mailbox, item):
+            original(mailbox, item)
+            if mailbox is worker._results:
+                done.set()
+        worker._replace = replace
+        try:
+            worker.capture(9, HorizontalTarget(101, 42), .5)
+            self.assertTrue(done.wait(1))
+            result = worker.poll()
+            self.assertEqual(result.target, target)
+            self.assertEqual(result.utc, UTC)
+            self.assertEqual(result.horizontal.utc, UTC)
+            self.assertEqual((result.mount.heading_deg, result.mount.pitch_deg), (95, 40))
         finally:
             worker.close()
 

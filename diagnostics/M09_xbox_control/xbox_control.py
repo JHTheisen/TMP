@@ -346,7 +346,6 @@ def main(argv=None):
         rx = ""
         discard_rx_line = False
         running = True
-        focused = True
         display_frozen = False
         diagnostic_snapshot = None
         response_snapshot = []
@@ -363,19 +362,10 @@ def main(argv=None):
                 if event.type == pygame.JOYDEVICEREMOVED and event.instance_id == joystick.get_instance_id():
                     raise RuntimeError("Xbox controller disconnected")
                 if event.type == pygame.WINDOWFOCUSLOST:
-                    log.event("INPUT", "window focus lost")
-                    focused = False
-                    centered_since = None
-                    takeover = False
-                    if session.state in ("active", "arming") or session.raw_mode or auto.enabled:
-                        session.disarm("Window lost focus; return, center sticks and rearm.", request_stop=True)
-                        auto.cancel(now, "Window lost focus; STOP requested, wait for READY.")
-                        if session.raw_mode:
-                            session.raw_waiting = True
+                    log.event("INPUT", "window focus lost; controller mode unchanged")
                 elif event.type == pygame.WINDOWFOCUSGAINED:
-                    log.event("INPUT", "window focus gained")
-                    focused = True
-            ui_actions = dashboard.handle_events(events, session.raw_mode) if focused else []
+                    log.event("INPUT", "window focus gained; controller mode unchanged")
+            ui_actions = dashboard.handle_events(events, session.raw_mode)
             was_automatic = auto.overridable
             if port is not None:
                 received = port.read(min(port.in_waiting, 4096))
@@ -408,7 +398,7 @@ def main(argv=None):
             carriage = stick_command(raw[args.carriage_axis], args.deadband, args.speed_scale, True)
             now = time.monotonic()
             centered = all(abs(raw[index]) <= args.deadband for index in (args.yaw_axis, args.pitch_axis, args.carriage_axis))
-            centered_since = (now if centered_since is None else centered_since) if centered and focused else None
+            centered_since = (now if centered_since is None else centered_since) if centered else None
             if session.state in ("active", "arming") and last_jog is not None and now - last_jog >= COMMAND_TIMEOUT:
                 session.disarm("Command stream paused; center sticks and rearm.", request_stop=True)
             def selected_button(event, button):
@@ -452,7 +442,7 @@ def main(argv=None):
             toggling_raw = any(pressed(event, pygame.K_F2) for event in events)
             safety_stop = ("stop" in ui_actions or
                            any(pressed(event, pygame.K_F12) or pressed(event, pygame.K_SPACE) for event in events))
-            suppress_submit = safety_stop or toggling_raw or any(event.type == pygame.WINDOWFOCUSLOST for event in events)
+            suppress_submit = safety_stop or toggling_raw
             if safety_stop:
                 takeover = False
                 centered_since = None
@@ -465,12 +455,12 @@ def main(argv=None):
                     session.raw_waiting = False
             for index, event in enumerate(events):
                 key = event.key if event.type == pygame.KEYDOWN else None
-                if key == pygame.K_F3 and focused and not getattr(event, "repeat", False):
+                if key == pygame.K_F3 and not getattr(event, "repeat", False):
                     display_frozen = not display_frozen
                     dashboard.toggle_diagnostics(True)
                     log.event("DISPLAY", "frozen; controls and telemetry remain live" if display_frozen else "live; showing latest state")
                     continue
-                if key == pygame.K_F2 and focused and not getattr(event, "repeat", False):
+                if key == pygame.K_F2 and not getattr(event, "repeat", False):
                     dashboard.blur_editor()
                     takeover = False
                     auto.leave(now)
@@ -489,8 +479,6 @@ def main(argv=None):
                         session.raw_waiting = False
                     continue
                 if session.raw_mode:
-                    if not focused:
-                        continue
                     if key == pygame.K_TAB:
                         session.raw_text += " "  # Keep Space reserved for STOP in every mode.
                     elif key == pygame.K_BACKSPACE:
@@ -555,7 +543,7 @@ def main(argv=None):
                         session.raw_text += "".join(character for character in event.text if character.isprintable())
                     continue
                 if auto.enabled:
-                    if not focused or suppress_submit:
+                    if suppress_submit:
                         continue
                     action = hat_actions.get(index)
                     if index in fresh_buttons:
@@ -586,7 +574,7 @@ def main(argv=None):
                         else:
                             log.event("AUTO_NOT_SENT", auto.note)
                     continue
-            if not session.raw_mode and focused and not suppress_submit:
+            if not session.raw_mode and not suppress_submit:
                 # GUI buttons use the exact same AutoSession request paths as
                 # their existing gamepad equivalents. No motion policy lives
                 # in the dashboard.
@@ -618,6 +606,28 @@ def main(argv=None):
                                 takeover = False
                                 send(data)
                         continue
+                    if action == "track_here":
+                        try:
+                            data = auto.request_track_here(
+                                now, centered_since is not None and now - centered_since >= .5,
+                                session.sensor_fields, session.sensor_status_at, dry_run=args.dry_run)
+                        except ValueError as error:
+                            notice = str(error)
+                            dashboard.notice = notice
+                            log.event("CELESTIAL_NOT_SENT", notice)
+                            lines = (lines + [notice])[-8:]
+                        else:
+                            dashboard.notice = "Current pointing captured for celestial tracking."
+                            log.event("CELESTIAL_REQUEST", auto.celestial_status)
+                            if args.dry_run:
+                                print("AUTO DRY RUN: TRACK HERE")
+                            elif data is not None:
+                                session.stop_raw(now)
+                                session.auto_mode = True
+                                last_jog = centered_since = None
+                                takeover = False
+                                send(data)
+                        continue
                     if action in ("level", "north", "capture_a", "capture_b", "return_a", "play"):
                         data = auto.request(action, now, centered_since is not None and now - centered_since >= .5)
                         if data is not None:
@@ -637,7 +647,7 @@ def main(argv=None):
             # A deliberate stick displacement cancels the entire sequence before
             # any prepared follow-up can be sent. Wait for STOP/READY and the zero
             # JOG acknowledgment, then use only the current live stick value.
-            if (focused and not suppress_submit and not centered and
+            if (not suppress_submit and not centered and
                     (auto.overridable or (was_automatic and auto.phase == "READY"))):
                 if session.raw_mode:
                     # Explicit manual intervention leaves an executing raw motion,
@@ -651,7 +661,7 @@ def main(argv=None):
                 takeover = True
                 last_jog = None
             session.auto_mode = auto.busy
-            if focused and not session.raw_mode and not auto.busy and not suppress_submit and now >= next_send:
+            if not session.raw_mode and not auto.busy and not suppress_submit and now >= next_send:
                 centered_ready = centered_since is not None and now - centered_since >= .5
                 if session.arm(now, takeover or centered_ready):
                     last_jog = None
@@ -668,7 +678,7 @@ def main(argv=None):
                         if frame.startswith(b"JOG "):
                             last_jog = now
                 next_send = now + SEND_INTERVAL  # No catch-up bursts of old input.
-            if auto.enabled and focused and not suppress_submit and not args.dry_run:
+            if auto.enabled and not suppress_submit and not args.dry_run:
                 command = auto.frame(now)
                 if command is not None:
                     log.event("AUTO_TX", repr(command))
