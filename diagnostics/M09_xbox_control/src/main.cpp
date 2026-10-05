@@ -54,7 +54,7 @@ constexpr int32_t PITCH_TRAVEL_ACCELERATION = 2400;
 enum class Operation { NORTH_LEVEL, POSE, MANUAL, LEVEL, NORTH, CELESTIAL };
 
 enum class Phase { STARTUP, BASELINE, MOVING, SETTLING, COMPLETE, ABORTED, MANUAL };
-enum class Motion { PRECISION, SLEW, BRAKING, HOLD };
+enum class Motion { PRECISION, SLEW, BRAKING, HOLD, TRACK };
 struct Axis {
     FastAccelStepper *motor = nullptr;
     bool pitch = false, settled = false, confirmed = false;
@@ -157,9 +157,11 @@ void celestialResult(const char *reason, bool latched);
 void celestialBnoUnavailable(const char *reason);
 void celestialRecordTrustedBno();
 void celestialRecordBnoRecovery(const EulerAngles &sample, uint8_t accuracy, uint32_t sampleAt);
+void resumeCelestialBnoFeedback(uint32_t now);
 bool celestialUsingEncoderFeedback();
 bool celestialControlFeedbackReady();
 bool serviceCelestialEncoderFeedback(uint32_t now, uint32_t &sampleAt, bool &newSample);
+void serviceCelestialTracking(uint32_t now, uint32_t sampleAt);
 
 bool alignmentActive() { return poseActive && (operation == Operation::LEVEL || operation == Operation::NORTH); }
 bool pitchControlRequired() { return !alignmentActive() || operation == Operation::LEVEL; }
@@ -254,6 +256,7 @@ const char *motionText(const Axis &axis) {
     case Motion::SLEW: return "SLEW";
     case Motion::BRAKING: return "BRAKING";
     case Motion::HOLD: return "HOLD";
+    case Motion::TRACK: return "TRACK";
     }
     return "UNKNOWN";
 }
@@ -465,7 +468,8 @@ void serviceBno() {
     bnoDiagnostics.observe(event, sample.receivedMs);
     EulerAngles plausible;
     if (sample.epoch == sensorWorker.resetEpoch.load(std::memory_order_acquire) &&
-        event.sensorId == SH2_ROTATION_VECTOR && quaternionToEuler(event.un.rotationVector, plausible) &&
+        event.sensorId == SH2_ROTATION_VECTOR && bnoDiagnostics.plausible &&
+        quaternionToEuler(event.un.rotationVector, plausible) &&
         (!hasPlausibleOrientation || sampleAtOrAfter(sample.receivedMs, lastPlausibleAt))) {
         lastPlausibleOrientation = plausible; lastPlausibleAt = sample.receivedMs;
         lastPlausibleAccuracy = event.status; hasPlausibleOrientation = true;
@@ -483,7 +487,7 @@ void serviceBno() {
         bnoDiagnostics.reason = "out_of_order_receipt"; return;
     }
     EulerAngles result;
-    if (!quaternionToEuler(event.un.rotationVector, result)) {
+    if (!bnoDiagnostics.plausible || !quaternionToEuler(event.un.rotationVector, result)) {
         bnoDiagnostics.reason = "invalid_quaternion";
         alignmentSampleInvalid = true;
         if (alignmentActive() || celestialActive()) invalidateOrientation("invalid BNO orientation");
@@ -513,7 +517,10 @@ void serviceBno() {
     acceptedBnoSequence = event.sequence; acceptedBnoTimestamp = event.timestamp;
     bnoValid = true; lastBnoGood = now;
     alignmentSampleInvalid = false;
-    if (celestialActive()) celestialRecordTrustedBno();
+    if (celestialActive()) {
+        celestialRecordTrustedBno();
+        resumeCelestialBnoFeedback(millis());
+    }
     if (poseActive && poseNeedsBno && !poseStopping && !alignmentPaused) {
         motionWatchdog.recordFresh(now);
     }
@@ -758,6 +765,10 @@ void serviceAxes() {
         pitchAxis.current = physicalPitch(); pitchAxis.error = pitchAxis.target - pitchAxis.current;
     }
     if (!sampleAtOrAfter(sampleAt, controlStartedAt)) return;
+    if (celestialActive() && celestialTracking) {
+        serviceCelestialTracking(now, sampleAt);
+        return;
+    }
     // Absolute POSE always checks yaw; MOVE 0 dp ds explicitly leaves yaw uncontrolled.
     if ((yawRequired && !axisProgress(yawAxis, yawAxis.error)) ||
         (pitchControlRequired() && !axisProgress(pitchAxis, pitchAxis.error))) return;

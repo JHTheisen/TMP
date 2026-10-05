@@ -59,6 +59,17 @@ class OperatorDashboardTests(unittest.TestCase):
             log_label="test.log", display_frozen=display_frozen,
             diagnostic_lines=session.diagnostic_lines(2.0), response_lines=[])
 
+    def test_display_flip_has_separate_slow_operation_timing(self):
+        screen = pygame.display.set_mode((1100, 760), pygame.RESIZABLE)
+        samples = iter((10.0, 10.2))
+        timings = []
+        dashboard = OperatorDashboard(
+            pygame, timing=lambda operation, elapsed: timings.append((operation, elapsed)),
+            clock=lambda: next(samples))
+        self.draw(screen, dashboard, ManualSession(), AutoSession())
+        self.assertEqual(timings[0][0], "pygame.display.flip")
+        self.assertAlmostEqual(timings[0][1], .2)
+
     def test_live_orientation_uses_existing_sensor_angles_even_while_display_frozen(self):
         screen, dashboard, session, auto = self.make_dashboard()
         output = []
@@ -224,13 +235,15 @@ class OperatorDashboardTests(unittest.TestCase):
         self.assertIn("ENCODER PROPAGATED / BNO DEGRADED", output)
         self.assertIn("ENC Y:OK  P:OK", output)
 
-    def test_carriage_position_is_as_prominent_as_yaw_and_pitch(self):
+    def test_roll_is_as_prominent_as_yaw_and_pitch(self):
         screen, dashboard, session, auto = self.make_dashboard()
         output = []
         dashboard.title = RecordingFont(dashboard.title, output)
-        session.receive("MANUAL_STATE carriage_steps=-123456", 1.9)
+        dashboard.small = RecordingFont(dashboard.small, output)
+        session.receive("BNO_STATE pitch_roll=-12.345", 1.9)
         self.draw(screen, dashboard, session, auto)
-        self.assertIn("-123456", output)
+        self.assertIn("ROLL", output)
+        self.assertIn("-12.345\N{DEGREE SIGN}", output)
 
     def test_low_accuracy_bno_and_bad_encoder_magnet_are_degraded(self):
         self.assertEqual(OperatorDashboard._health(

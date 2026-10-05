@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 import math
 import textwrap
+import time
 
 
 BG = (14, 18, 24)
@@ -80,8 +81,10 @@ class OperatorDashboard:
     MIN_WIDTH = 820
     MIN_HEIGHT = 620
 
-    def __init__(self, pygame):
+    def __init__(self, pygame, timing=None, clock=None):
         self.pygame = pygame
+        self.timing = timing
+        self.clock = clock or time.monotonic
         self.font = pygame.font.SysFont("segoeui", 17)
         self.small = pygame.font.SysFont("segoeui", 14)
         self.title = pygame.font.SysFont("segoeui", 28, True)
@@ -325,9 +328,9 @@ class OperatorDashboard:
 
         enc_a, enc_a_color = self._health(session.encoder_fields.get("A", {}), session.encoder_status_at.get("A"), now)
         enc_b, enc_b_color = self._health(session.encoder_fields.get("B", {}), session.encoder_status_at.get("B"), now)
-        carriage_value = session.carriage_steps if session.carriage_steps is not None else "?"
-        self._text(screen, self.small, "CARRIAGE STEPS", (cards[3].x + 12, cards[3].y + 7), MUTED)
-        self._text(screen, self.title, carriage_value, (cards[3].x + 12, cards[3].y + 28), TEXT)
+        roll = session.sensor_fields.get("pitch_roll", "?")
+        self._text(screen, self.small, "ROLL", (cards[3].x + 12, cards[3].y + 7), MUTED)
+        self._text(screen, self.title, f"{roll}\N{DEGREE SIGN}", (cards[3].x + 12, cards[3].y + 28), TEXT)
         compact_health = {"NO REPORT": "--", "DEGRADED": "WARN", "UNKNOWN": "?"}
         encoder_summary = (f"ENC Y:{compact_health.get(enc_a, enc_a)}  "
                            f"P:{compact_health.get(enc_b, enc_b)}")
@@ -422,5 +425,8 @@ class OperatorDashboard:
                 self._text(screen, self.small, row, (overlay.x + 14, y), MUTED)
                 y += 18
 
+        flip_started = self.clock()
         pygame.display.flip()
+        if self.timing is not None:
+            self.timing("pygame.display.flip", self.clock() - flip_started)
 

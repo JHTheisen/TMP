@@ -1,7 +1,8 @@
 #pragma once
 #include "sensor_support.h"
 
-// Observation only: never feeds a motor, reference or watchdog decision.
+// Raw observation; the foreground also uses plausibility to reject malformed
+// orientation samples. This never gates manual motion or STOP.
 // Counts events returned to the application, not every report inside SH-2.
 struct BnoDiagnostics {
     uint32_t events = 0, rotations = 0, otherReports = 0, statusChanges = 0;
@@ -31,7 +32,7 @@ struct BnoDiagnostics {
         rotation = event.un.rotationVector; rotationAt = now;
         normSquared = double(rotation.real)*rotation.real + double(rotation.i)*rotation.i +
             double(rotation.j)*rotation.j + double(rotation.k)*rotation.k;
-        // Diagnostic label only. Do not alter acceptance, feedback or watchdogs.
+        // Broad validity bounds, shared with foreground orientation acceptance.
         plausible = isfinite(normSquared) && fabs(normSquared - 1.0) <= 0.05 &&
             isfinite(rotation.accuracy) && rotation.accuracy >= 0;
         if (!plausible) ++malformed;

@@ -36,6 +36,15 @@ class AutoSession:
         self.celestial_status = ""
         self.celestial_feedback = ""
         self.celestial_source = ""
+        self._manual_rearm_required = False
+
+    def _require_manual_rearm(self):
+        self._manual_rearm_required = True
+
+    def consume_manual_rearm_required(self):
+        required = self._manual_rearm_required
+        self._manual_rearm_required = False
+        return required
 
     def configure_celestial(self, observer, reference):
         if self.celestial is not None:
@@ -255,6 +264,7 @@ class AutoSession:
             elif self.action == "celestial" and self.phase in ("CELESTIAL_GOTO", "CELESTIAL_TRACK"):
                 # READY after a firmware reset/stop must never leave a host
                 # update source alive, even if a terminal telemetry line was lost.
+                self._require_manual_rearm()
                 self._finish("Celestial operation ended at firmware READY.")
                 self.phase = "READY"
                 self.deadline = None
@@ -306,12 +316,15 @@ class AutoSession:
                 self.celestial_feedback = "BNO target/error yaw=" + fields.get("yaw_target", "?") + "/" + fields.get("yaw_error", "?") + " pitch=" + fields.get("pitch_target", "?") + "/" + fields.get("pitch_error", "?") + " deg"
                 return
             if line.startswith("CELESTIAL_RESULT "):
+                if fields.get("status") == "FAILED":
+                    self._require_manual_rearm()
                 self._finish(line)
                 self.deadline = now + 4.0
                 return
             if line.startswith("CELESTIAL_REJECTED "):
                 # Rejected live updates may leave braking outstanding. STOP is
                 # also safe for rejected admission and guarantees a new READY.
+                self._require_manual_rearm()
                 self.cancel(now, line)
                 self.continuation = self._command("STOP")
                 return
@@ -406,6 +419,8 @@ class AutoSession:
     def frame(self, now):
         if self.busy and ((self.deadline is not None and now >= self.deadline) or
                           (self.last_rx is not None and now - self.last_rx > 3.0)):
+            if self.action == "celestial":
+                self._require_manual_rearm()
             self.invalidate("autonomous acknowledgment/telemetry timed out; coordinate confidence unknown")
             self.cancel(now, self.note)
             self.phase = "FAULT"
@@ -435,6 +450,7 @@ class AutoSession:
                         self._describe_celestial(result)
                         return self._command(f"CELESTIAL_UPDATE {self.pending_id} {self.celestial.sequence} {result.mount.heading_deg:.6f} {result.mount.pitch_deg:.6f}")
             except Exception as error:
+                self._require_manual_rearm()
                 self.cancel(now, f"Celestial canceled: {error}")
                 return self._command("STOP")
         if self.phase == "AT_A_SETTLE" and now >= self.settle_until:

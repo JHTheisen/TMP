@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import session_log
 from session_log import SessionLog
 
 
@@ -89,6 +90,19 @@ class LoggingTests(unittest.TestCase):
             log.event("TEST", "still running")
         self.assertIn("disk full", log.error)
         log.event("STOP", "does not raise")
+
+    def test_abnormal_timing_only_and_slow_flush_are_recorded(self):
+        log = self.logger()
+        log.timing("fast.operation", .149)
+        log.timing("slow.operation", .151)
+        base = log._start
+        with mock.patch.object(session_log.time, "monotonic",
+                               side_effect=[base, base, base, base, base + .2, base + .2]):
+            log.event("TEST", "slow flush fixture")
+        data = log.path.read_text(encoding="utf-8")
+        self.assertNotIn("operation=fast.operation", data)
+        self.assertIn("HOST_TIMING operation=slow.operation elapsed_ms=151.0 threshold_ms=150", data)
+        self.assertIn("HOST_TIMING operation=session_log.flush elapsed_ms=200.0 threshold_ms=150", data)
 
     def test_open_failure_reports_and_remains_usable(self):
         bad = Path(self.directory.name) / "file"

@@ -59,9 +59,12 @@ try {
     Build-Test 'celestial_motion_test.cpp' 'celestial_motion'
     Run-Cases 'celestial_motion' @('goto','goto_unqualified','high_reduction','tracking','wrap','missing','low_admission','invalid','busy','yaw_guard',
         'stop','track_stop','abort','track_abort','stale','track_stale','accuracy','track_accuracy','reset','track_reset',
-        'bad_feedback','track_unavailable','track_intermittent','track_encoder_feedback','track_long_outage','track_recovery','track_manual',
+        'bad_feedback','track_unavailable','track_intermittent','track_encoder_feedback','track_long_outage','track_recovery','track_unscaled_recovery','track_manual',
         'lease','track_lease','stale_update','target_jump','updated_guard','no_progress','wrong_direction',
-        'deadline','blocked_foreground')
+        'deadline','blocked_foreground','track_rate_smooth','track_rate_noise','track_rate_wrap',
+        'track_rate_reverse','track_rate_lease','track_rate_unscaled_recovery','track_rate_fallback',
+        'track_rate_stall','track_rate_rejected','track_rate_jitter','track_rate_weak','track_rate_residual','track_malformed',
+        'track_sign_positive','track_sign_negative','track_sign_residual_positive','track_sign_residual_negative')
     & '.pio/host_tests/keyframe_math.exe'
     if ($LASTEXITCODE -ne 0) { throw 'Keyframe timing math failed' }
     Build-Test 'keyframe_motion_test.cpp' 'keyframe_motion'

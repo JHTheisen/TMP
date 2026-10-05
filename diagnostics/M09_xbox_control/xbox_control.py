@@ -319,7 +319,7 @@ def main(argv=None):
         except (AttributeError, pygame.error):
             pass  # Older SDL builds still retain ordinary resizable window chrome.
         pygame.key.stop_text_input()  # Ordinary control keys are never command text.
-        dashboard = OperatorDashboard(pygame)
+        dashboard = OperatorDashboard(pygame, timing=log.timing, clock=time.monotonic)
         lines = []
         if not args.dry_run:
             import serial
@@ -335,8 +335,12 @@ def main(argv=None):
                 log.event("RAW_TX_ATTEMPT", repr(data))
             else:
                 log.transmitted(data, time.monotonic())
-            if port is not None and port.write(data) != len(data):
-                raise RuntimeError("Incomplete serial write")
+            if port is not None:
+                write_started = time.monotonic()
+                written = port.write(data)
+                log.timing("serial.write", time.monotonic() - write_started)
+                if written != len(data):
+                    raise RuntimeError("Incomplete serial write")
             if raw_command:
                 log.event("RAW_TX", repr(session.last_raw_command))
         now = time.monotonic()
@@ -353,10 +357,14 @@ def main(argv=None):
         hat_neutral = True
         input_notice = "LB/RB capture; Home plays; A = LEVEL; Y = magnetic NORTH."
         takeover = False
+        failure_rearm = None
         celestial_last_status = None
         while running:
+            loop_started = time.monotonic()
             now = time.monotonic()
+            event_started = time.monotonic()
             events = pygame.event.get()  # Pumps input before every read, as in v05.
+            log.timing("pygame.event.get", time.monotonic() - event_started)
             now = time.monotonic()
             for event in events:
                 if event.type == pygame.JOYDEVICEREMOVED and event.instance_id == joystick.get_instance_id():
@@ -365,9 +373,12 @@ def main(argv=None):
                     log.event("INPUT", "window focus lost; controller mode unchanged")
                 elif event.type == pygame.WINDOWFOCUSGAINED:
                     log.event("INPUT", "window focus gained; controller mode unchanged")
+            ui_started = time.monotonic()
             ui_actions = dashboard.handle_events(events, session.raw_mode)
+            log.timing("dashboard.handle_events", time.monotonic() - ui_started)
             was_automatic = auto.overridable
             if port is not None:
+                rx_started = time.monotonic()
                 received = port.read(min(port.in_waiting, 4096))
                 if any(value > 127 for value in received):
                     log.sampled("non_ascii", "PARSER", f"non-ASCII serial bytes: {received[:96]!r}", now, 0.5)
@@ -390,15 +401,30 @@ def main(argv=None):
                     discard_rx_line = True
                     log.event("PARSER", "overlong telemetry line discarded (>8192 bytes); command stream continues")
                     lines = (lines + ["Malformed telemetry line discarded; command stream continues."])[-8:]
+                log.timing("serial.rx_processing", time.monotonic() - rx_started)
+            if auto.consume_manual_rearm_required():
+                failure_rearm = "await_move"
+                centered_since = None
+                takeover = False
+                log.event("MANUAL_REARM", "unexpected celestial failure; waiting for a fresh stick displacement")
             session.auto_mode = auto.busy
             # Read current axes after receiving status; never replay pre-pause input.
+            joystick_started = time.monotonic()
             raw = [joystick.get_axis(i) for i in range(joystick.get_numaxes())]
+            log.timing("joystick.poll", time.monotonic() - joystick_started)
             yaw = stick_command(raw[args.yaw_axis], args.deadband, args.speed_scale, args.invert_yaw)
             pitch = stick_command(raw[args.pitch_axis], args.deadband, args.speed_scale, not args.no_invert_pitch)
             carriage = stick_command(raw[args.carriage_axis], args.deadband, args.speed_scale, True)
             now = time.monotonic()
             centered = all(abs(raw[index]) <= args.deadband for index in (args.yaw_axis, args.pitch_axis, args.carriage_axis))
             centered_since = (now if centered_since is None else centered_since) if centered else None
+            if failure_rearm == "await_move" and not centered:
+                failure_rearm = "await_center"
+                log.event("MANUAL_REARM", "fresh stick displacement observed; waiting for centered dwell")
+            elif (failure_rearm == "await_center" and centered_since is not None and
+                  now - centered_since >= .5):
+                failure_rearm = None
+                log.event("MANUAL_REARM", "fresh centered dwell complete; manual arming enabled")
             if session.state in ("active", "arming") and last_jog is not None and now - last_jog >= COMMAND_TIMEOUT:
                 session.disarm("Command stream paused; center sticks and rearm.", request_stop=True)
             def selected_button(event, button):
@@ -663,8 +689,9 @@ def main(argv=None):
             session.auto_mode = auto.busy
             if not session.raw_mode and not auto.busy and not suppress_submit and now >= next_send:
                 centered_ready = centered_since is not None and now - centered_since >= .5
-                if session.arm(now, takeover or centered_ready):
+                if (failure_rearm is None or takeover) and session.arm(now, takeover or centered_ready):
                     last_jog = None
+                    failure_rearm = None
                     takeover = False
             if session.pending_stop:
                 takeover = False
@@ -679,7 +706,11 @@ def main(argv=None):
                             last_jog = now
                 next_send = now + SEND_INTERVAL  # No catch-up bursts of old input.
             if auto.enabled and not suppress_submit and not args.dry_run:
-                command = auto.frame(now)
+                auto_started = time.monotonic()
+                try:
+                    command = auto.frame(now)
+                finally:
+                    log.timing("AutoSession.frame", time.monotonic() - auto_started)
                 if command is not None:
                     log.event("AUTO_TX", repr(command))
                     send(command)
@@ -700,17 +731,24 @@ def main(argv=None):
             if not display_frozen or diagnostic_snapshot is None:
                 diagnostic_snapshot = session.diagnostic_lines(now) + [""] if not args.dry_run else []
                 response_snapshot = list(lines)
-            dashboard.draw(
-                screen, now=now, session=session, auto=auto,
-                joystick_name=joystick.get_name(),
-                serial_label="DRY RUN - CLOSED" if args.dry_run else f"{args.port} | {session.state.upper()}",
-                yaw=yaw, pitch=pitch, carriage=carriage, centered=centered,
-                raw_axes=raw, input_notice=dashboard.notice or input_notice,
-                log_label=(log.path.name if log.path else "UNAVAILABLE"),
-                display_frozen=display_frozen,
-                diagnostic_lines=(diagnostic_snapshot + auto.display_lines()),
-                response_lines=response_snapshot)
+            draw_started = time.monotonic()
+            try:
+                dashboard.draw(
+                    screen, now=now, session=session, auto=auto,
+                    joystick_name=joystick.get_name(),
+                    serial_label="DRY RUN - CLOSED" if args.dry_run else f"{args.port} | {session.state.upper()}",
+                    yaw=yaw, pitch=pitch, carriage=carriage, centered=centered,
+                    raw_axes=raw, input_notice=dashboard.notice or input_notice,
+                    log_label=(log.path.name if log.path else "UNAVAILABLE"),
+                    display_frozen=display_frozen,
+                    diagnostic_lines=(diagnostic_snapshot + auto.display_lines()),
+                    response_lines=response_snapshot)
+            finally:
+                log.timing("dashboard.draw", time.monotonic() - draw_started)
+            sleep_started = time.monotonic()
             time.sleep(0.005)
+            log.timing("time.sleep", time.monotonic() - sleep_started)
+            log.timing("host.main_loop", time.monotonic() - loop_started)
     except KeyboardInterrupt:
         failed = True
         log.exception("Operator Ctrl+C stop")

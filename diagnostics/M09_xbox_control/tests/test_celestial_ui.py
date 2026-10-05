@@ -32,6 +32,16 @@ def submit(value=TARGET):
 
 
 class CelestialUiTests(unittest.TestCase):
+    @staticmethod
+    def fail_celestial(port):
+        ident = port.celestial_id
+        port.track_at = port.celestial_id = None
+        port.mode = "READY"
+        port.rx += (f"CELESTIAL_RESULT id={ident} status=FAILED "
+                    "reason=target update lease expired after 3000 ms\n"
+                    "M09 READY\n"
+                    "OPERATION FAILED: target update lease expired after 3000 ms\n").encode()
+
     def test_bno_display_failures_leave_celestial_serial_stream_unchanged(self):
         baseline = self.run_ui([(1.4, submit())], until=4.6, real_session=True)
         def invalid(port):
@@ -403,7 +413,7 @@ class CelestialUiTests(unittest.TestCase):
                 self.assertFalse(session.raw_mode)
                 self.assertTrue(any(stamp > at + .5 and data == b"JOG 0 0 0\n" for stamp, data in writes))
 
-    def test_below_horizon_and_calculation_failure_restore_manual(self):
+    def test_below_horizon_and_calculation_failure_stay_disarmed(self):
         for error in ("ValueError: Target is below the horizon (altitude=-4.000deg)",
                       "RuntimeError: simulated celestial calculation failure"):
             with self.subTest(error=error):
@@ -416,8 +426,35 @@ class CelestialUiTests(unittest.TestCase):
                 self.assertIn(error, log)
                 celestial_stops = [stamp for stamp, data in writes if stamp >= 1.4 and data == b"STOP\n"]
                 self.assertGreaterEqual(len(celestial_stops), 2)
-                self.assertTrue(any(stamp > celestial_stops[-1] + .5 and data == b"JOG 0 0 0\n"
-                                    for stamp, data in writes))
+                self.assertFalse(any(stamp > celestial_stops[-1] and data.startswith(b"JOG ")
+                                     for stamp, data in writes))
+                self.assertIn("MANUAL_REARM unexpected celestial failure", log)
+
+    def test_failed_celestial_stays_ready_disarmed_until_fresh_move_and_center_dwell(self):
+        failed_at = 2.8
+        result, writes, _, session, auto, _, log = self.run_ui([
+            (1.4, submit()), (failed_at, self.fail_celestial)], until=5.0, real_session=True)
+        self.assertEqual(result, 0)
+        self.assertEqual(auto.phase, "READY")
+        self.assertEqual(session.state, "idle")
+        self.assertFalse(any(stamp >= failed_at and data.startswith(b"JOG ") for stamp, data in writes))
+        self.assertIn("waiting for a fresh stick displacement", log)
+
+        moved_at, centered_at = 3.2, 3.4
+        result, writes, _, session, auto, _, log = self.run_ui([
+            (1.4, submit()), (failed_at, self.fail_celestial),
+            (moved_at, lambda port: port.axes.__setitem__(0, .8)),
+            (centered_at, lambda port: port.axes.__setitem__(0, 0.0))],
+            until=4.3, real_session=True)
+        after_failure = [(stamp, data) for stamp, data in writes if stamp >= failed_at and data.startswith(b"JOG ")]
+        self.assertEqual(result, 0)
+        self.assertEqual(auto.phase, "READY")
+        self.assertEqual(session.state, "active")
+        self.assertTrue(after_failure)
+        self.assertEqual(after_failure[0][1], b"JOG 0 0 0\n")
+        self.assertGreaterEqual(after_failure[0][0], centered_at + .5)
+        self.assertIn("fresh stick displacement observed", log)
+        self.assertIn("fresh centered dwell complete", log)
 
     def test_celestial_terminal_result_and_ready_restore_manual(self):
         def complete(port):

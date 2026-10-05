@@ -8,6 +8,9 @@ import time
 import traceback
 
 
+SLOW_OPERATION_SECONDS = 0.150
+
+
 class SessionLog:
     def __init__(self, directory, settings):
         self.path = None
@@ -51,10 +54,32 @@ class SessionLog:
         stamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
         elapsed = time.monotonic() - self._start
         try:
+            write_started = time.monotonic()
             self._file.write(f"{stamp} +{elapsed:.3f}s {kind} {message}\n")
+            write_elapsed = time.monotonic() - write_started
+            flush_started = time.monotonic()
             self._file.flush()  # Survives Python exceptions/termination; not a power-loss fsync guarantee.
+            flush_elapsed = time.monotonic() - flush_started
+            # Do not recurse through event(): the diagnostic write itself must
+            # remain bounded to one extra record even when storage is slow.
+            for operation, duration in (("session_log.write", write_elapsed),
+                                        ("session_log.flush", flush_elapsed)):
+                if duration >= SLOW_OPERATION_SECONDS:
+                    timing_stamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+                    timing_elapsed = time.monotonic() - self._start
+                    self._file.write(
+                        f"{timing_stamp} +{timing_elapsed:.3f}s HOST_TIMING "
+                        f"operation={operation} elapsed_ms={duration * 1000:.1f} "
+                        f"threshold_ms={SLOW_OPERATION_SECONDS * 1000:.0f}\n")
+                    self._file.flush()
         except OSError as error:
             self._failed(error)  # Disk trouble does not add a motor interlock.
+
+    def timing(self, operation, elapsed, threshold=SLOW_OPERATION_SECONDS):
+        """Record only abnormal synchronous latency; normal loops stay quiet."""
+        if elapsed >= threshold:
+            self.event("HOST_TIMING", f"operation={operation} elapsed_ms={elapsed * 1000:.1f} "
+                       f"threshold_ms={threshold * 1000:.0f}")
 
     def sampled(self, key, kind, message, now, period, signature=None):
         previous = self._samples.get(key)

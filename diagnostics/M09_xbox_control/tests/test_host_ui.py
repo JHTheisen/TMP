@@ -91,6 +91,8 @@ class HostUiTests(unittest.TestCase):
                     clock.now += 0.2
                 elif scenario == "long_pause":
                     clock.now += 0.3
+                elif scenario == "timing":
+                    clock.now += 0.2
                 elif scenario == "reject":
                     port.rx += b"MANUAL REJECTED: bad input\n"
                 elif scenario == "firmware_fault":
@@ -170,6 +172,8 @@ class HostUiTests(unittest.TestCase):
                                     for stamp, data in zip(write_times, writes)))
                 self.assertFalse(any(0.9 < stamp < 1.3 and data.strip() == b"STOP"
                                      for stamp, data in zip(write_times, writes)))
+            if scenario == "timing":
+                self.assertIn("HOST_TIMING operation=pygame.event.get elapsed_ms=200.0 threshold_ms=150", self.last_log)
 
     def test_dry_run_never_opens_serial(self):
         self.run_ui("dry_run")
@@ -188,6 +192,9 @@ class HostUiTests(unittest.TestCase):
 
     def test_command_lease_lapse_disarms_before_nonzero_can_resume(self):
         self.run_ui("long_pause")
+
+    def test_abnormal_event_pump_latency_is_logged(self):
+        self.run_ui("timing")
 
     def test_receive_only_telemetry_gap_does_not_stop_live_commands(self):
         self.run_ui("telemetry")

@@ -46,5 +46,15 @@ int main() {
     sample.event.un.rotationVector = {0,0,0,0,0};
     assert(sensorWorker.samples.push(sample)); serviceBno();
     assert(lastPlausibleAt == retainedAt);
+    // Powered malformed sample: finite Euler math used to admit this norm.
+    sample.event.un.rotationVector = {-0.0000610351562f,-0.0141601562f,
+        -0.0000610351562f,-0.0000610351562f,-0.000244140625f};
+    sample.receivedMs = millis();
+    assert(sensorWorker.samples.push(sample)); serviceBno();
+    assert(!bnoDiagnostics.accepted && !bnoDiagnostics.plausible);
+    assert(lastPlausibleAt == retainedAt && manualActive);
+    assert(yawMotor->isRunning() && pitchMotor->isRunning() && carriageMotor->isRunning());
+    simulated::serialInput="STOP\n"; advance(1500);
+    assert(commandIdle() && poseMotorsStopped());
     puts("PASS sensor results: old samples stay stale, reset survives queue overflow, no foreground I/O or manual disarm");
 }
