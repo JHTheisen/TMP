@@ -176,33 +176,25 @@ int main(int argc, char **argv) {
         CHECK(Serial.output.find("NORTH REJECTED: magnetic heading unavailable: accuracy_below_2")!=std::string::npos);
         CHECK(std::string(northUnavailableReason(millis()))=="accuracy_below_2");
         manual(); playKeyframe();
-    } else if (test=="north_219_guard") {
-        // The startup reference was qualified at 70 deg. Moving the continuous
-        // generated position to heading 219 puts both the present position and
-        // the shortest-path north target outside the preserved +/-185 deg cable guard.
-        simulated::yawDisturbance=149; advance(100);
-        CHECK(fabs(orientation.heading-219)<0.2);
+    } else if (test=="north_219_unbounded" || test=="north_projected_unbounded" ||
+            test=="north_negative_unbounded") {
+        // Keep the qualified startup reference; cross the former envelope in
+        // either direction without changing the chosen shortest heading move.
+        const bool negative = test=="north_negative_unbounded";
+        if (negative) { simulated::yawDisturbance=-150; advance(100); }
+        simulated::yawDisturbance=negative ? -254 : (test=="north_219_unbounded" ? 149 : 114);
+        advance(100);
+        const double reference = northTargetContinuous;
+        const double expectedMove = negative ? -176 : (test=="north_219_unbounded" ? 141 : 176);
+        const double expectedTarget = heading.continuous + expectedMove;
+        CHECK(fabs(expectedTarget-reference) > 185);
         Serial.output.clear(); command("NORTH");
-        CHECK(!poseActive && simulated::commands.empty());
-        CHECK(Serial.output.find("NORTH yaw travel guard exceeded")!=std::string::npos);
-        CHECK(Serial.output.find("guard_basis=absolute_unwrapped_envelope")!=std::string::npos);
-        CHECK(Serial.output.find("current_position_offset_deg=")!=std::string::npos);
-        CHECK(Serial.output.find("projected_target_offset_deg=")!=std::string::npos);
-        CHECK(Serial.output.find("shortest_move_deg=141.000")!=std::string::npos);
-        CHECK(Serial.output.find("limit_abs_offset_deg=185.0")!=std::string::npos);
-        CHECK(Serial.output.find("violation=current_position_and_projected_target_outside")!=std::string::npos);
-    } else if (test=="north_projected_limit_guard") {
-        // Startup north is centered at heading 70. At heading 184 the current
-        // unwrapped position is still inside +185, but the shortest north path
-        // ends at +360 and would cross the cable envelope.
-        simulated::yawDisturbance=114; advance(100);
-        CHECK(fabs(orientation.heading-184)<0.2);
-        Serial.output.clear(); command("NORTH");
-        CHECK(!poseActive && simulated::commands.empty());
-        CHECK(Serial.output.find("current_position_offset_deg=184.000")!=std::string::npos);
-        CHECK(Serial.output.find("projected_target_offset_deg=360.000")!=std::string::npos);
-        CHECK(Serial.output.find("shortest_move_deg=176.000")!=std::string::npos);
-        CHECK(Serial.output.find("violation=projected_target_outside")!=std::string::npos);
+        CHECK(alignmentActive() && !poseStopping);
+        CHECK(Serial.output.find("NORTH ACCEPTED")!=std::string::npos);
+        CHECK(fabs(yawAxis.target-expectedTarget)<0.001);
+        finishAlignment(true);
+        CHECK(fabs(shortestDifference(0, orientation.heading))<=TOLERANCE_DEG);
+        CHECK(fabs(heading.continuous-reference)>185);
     } else if (test=="invalid_admission") {
         simulated::invalidQuaternion=true; advance(25); command("LEVEL"); command("NORTH");
         CHECK(!poseActive && simulated::commands.empty());

@@ -32,7 +32,11 @@ void beginPoseStop(const char *reason = "operator STOP") {
 
 void servicePoseStop() {
     if (!poseStopping || !poseActive) return;
-    if (!poseMotorsStopped() && millis() - poseStopStartedAt >= BRAKING_TIMEOUT_MS) {
+    // For celestial cancellation, issue forceStop only once. Reasserting it
+    // while the queue drains can leave FAS's immediate-stop flag pending after
+    // its ramp has gone idle, which then consumes the next continuous start.
+    if ((!celestialActive() || !poseStopForced) && !poseMotorsStopped() &&
+            millis() - poseStopStartedAt >= BRAKING_TIMEOUT_MS) {
         if (yawMotor && yawMotor->isRunning()) yawMotor->forceStop();
         if (pitchMotor && pitchMotor->isRunning()) pitchMotor->forceStop();
         if (carriageMotor && carriageMotor->isRunning()) carriageMotor->forceStop();

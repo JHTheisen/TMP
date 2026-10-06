@@ -23,9 +23,20 @@ public:
     int8_t runForward() { return command(1, true); }
     int8_t runBackward() { return command(-1, true); }
     void applySpeedAcceleration() {} // The fixture integrates the configured rate on its next independent tick.
+    uint32_t getPeriodInUsAfterCommandsCompleted() {
+        return plant().stepPauses ? plant().appliedPeriodUs :
+            (isRunning() && plant().speed > 0 ? static_cast<uint32_t>(1000000.0 / plant().speed) : 0);
+    }
+    bool isQueueRunning() { return isRunning() && !plant().queueNeverStarts; }
+    bool isRampGeneratorActive() { return plant().drive != simulated::Drive::IDLE; }
+    uint32_t stepsToStop() {
+        return plant().stepPauses ? 1U : static_cast<uint32_t>(ceil(plant().velocity * plant().velocity / (2 * plant().acceleration)));
+    }
     bool isRunning() {
         auto &motor = plant();
-        if (motor.idleForceStopLatched && motor.drive == simulated::Drive::CONTINUOUS && millis() >= motor.runningVisibleAt) {
+        if (static_cast<int32_t>(motor.forceDrainUntil - millis()) > 0) return true;
+        if ((motor.idleForceStopLatched || motor.failContinuousStart) &&
+                motor.drive == simulated::Drive::CONTINUOUS && millis() >= motor.runningVisibleAt) {
             motor.drive = simulated::Drive::IDLE; motor.velocity = 0; motor.idleForceStopLatched = false;
             return false;
         }
@@ -34,13 +45,20 @@ public:
     int32_t getCurrentPosition() { return static_cast<int32_t>(plant().position); }
     int32_t getCurrentSpeedInMilliHz() { return static_cast<int32_t>(plant().velocity * 1000); }
     void stopMove() {
-        if (isRunning()) plant().drive = simulated::Drive::BRAKING;
+        if (isRunning()) {
+            if (plant().drive != simulated::Drive::BRAKING && plant().stepPauses)
+                plant().brakingSteps = stepsToStop();
+            plant().drive = simulated::Drive::BRAKING;
+        }
         ++simulated::gentleStops;
     }
     void forceStop() {
+        if (plant().forceStopFails) { ++simulated::forceStops; return; }
         if (!simulated::forceStops) simulated::firstForceStopAt = millis();
         if (simulated::latchIdleForceStop && plant().drive == simulated::Drive::IDLE)
             plant().idleForceStopLatched = true;
+        if (plant().drive != simulated::Drive::IDLE)
+            plant().forceDrainUntil = millis() + simulated::forceStopDrainMs;
         plant().drive = simulated::Drive::IDLE; plant().velocity = 0; plant().runningVisibleAt = 0;
         plant().stoppedAt = millis(); plant().needsStoppedSample = true;
         ++simulated::forceStops;
@@ -58,6 +76,10 @@ private:
             motor.continuousPhysicalMultiplier : motor.finitePhysicalMultiplier;
         motor.drive = continuous ? simulated::Drive::CONTINUOUS : simulated::Drive::FINITE;
         motor.runningVisibleAt = continuous ? millis() + simulated::continuousStartDelayMs : 0;
+        if (continuous && motor.stepPauses) {
+            motor.appliedPeriodUs = static_cast<uint32_t>(1000000.0 / motor.speed);
+            motor.nextStepAt = millis() + (motor.appliedPeriodUs + 999) / 1000;
+        }
         motor.needsStoppedSample = false;
         return MOVE_OK;
     }

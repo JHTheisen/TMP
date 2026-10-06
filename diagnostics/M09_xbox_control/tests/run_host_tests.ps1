@@ -49,7 +49,7 @@ try {
     Run-Cases 'orientation_commands' @('level_zero','level_delayed_slew_start','level_tolerance','level_positive','level_negative',
         'level_precision_negative','level_precision_positive','level_boundary_precision_negative','level_boundary_precision_positive',
         'level_boundary_slew_negative','level_boundary_slew_positive','level_eighty','level_high_reduction',
-        'north_zero','north_tolerance','north_positive','north_negative','north_359','north_1','north_180','north_219','north_large_success','north_travel_accept','north_219_guard','north_projected_limit_guard',
+        'north_zero','north_tolerance','north_positive','north_negative','north_359','north_1','north_180','north_219','north_large_success','north_travel_accept','north_219_unbounded','north_projected_unbounded','north_negative_unbounded',
         'level_low_quality','north_low_quality','level_transient','north_transient','level_reset','north_reset',
         'level_stale','north_stale','level_invalid','north_invalid','level_stop','north_stop',
         'north_stop_only','level_stall_stop','north_stall_stop','level_abort','north_abort','north_wrong_direction','north_braking_rebound','north_precision_noise','level_wrong_direction','level_no_progress',
@@ -57,7 +57,19 @@ try {
         'manual_handoff','level_manual_first_yaw','pending_stop','level_forced','north_forced','level_pause_stop','north_pause_stop')
     Build-Test 'keyframe_math_test.cpp' 'keyframe_math'
     Build-Test 'celestial_motion_test.cpp' 'celestial_motion'
-    Run-Cases 'celestial_motion' @('goto','goto_unqualified','high_reduction','tracking','wrap','missing','low_admission','invalid','busy','yaw_guard',
+    Build-Test 'celestial_low_rate_test.cpp' 'celestial_low_rate'
+    Run-Cases 'celestial_low_rate' @('stable','minimum_rate','zero','below_minimum','reverse','pending_period','brake_stuck',
+        'startup_latch','startup_fails','startup_timeout','unexpected_stop','forced_restart','takeover','lease','sensor_pause')
+    Build-Test 'celestial_zero_rate_test.cpp' 'celestial_zero_rate'
+    Run-Cases 'celestial_zero_rate' @('exact_zero','near_zero','long_zero','same_direction',
+        'positive_zero_negative','negative_zero_positive','unexpected_stop','failed_reversal','stop','takeover','lease')
+    # Verify the library behavior independently of our deterministic motor stub.
+    & $Compiler -std=c++11 -DTEST -I .pio/libdeps/esp32dev/FastAccelStepper/src tests/fas_low_rate_test.cpp -o .pio/host_tests/fas_low_rate.exe
+    if ($LASTEXITCODE -ne 0) { throw 'Installed FastAccelStepper ramp test compilation failed' }
+    & '.pio/host_tests/fas_low_rate.exe'
+    if ($LASTEXITCODE -ne 0) { throw 'Installed FastAccelStepper ramp test failed' }
+    Run-Cases 'celestial_motion' @('goto','goto_unqualified','high_reduction','tracking','wrap','missing','low_admission','invalid','busy',
+        'goto_sun','goto_yaw_outside','track_yaw_positive_unbounded','track_yaw_negative_unbounded',
         'stop','track_stop','abort','track_abort','stale','track_stale','accuracy','track_accuracy','reset','track_reset',
         'bad_feedback','track_unavailable','track_intermittent','track_encoder_feedback','track_long_outage','track_recovery','track_unscaled_recovery','track_manual',
         'lease','track_lease','stale_update','target_jump','updated_guard','no_progress','wrong_direction',

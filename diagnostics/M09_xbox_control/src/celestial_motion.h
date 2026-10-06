@@ -5,7 +5,6 @@ constexpr uint32_t CELESTIAL_LEASE_MS = 3000;
 constexpr uint32_t CELESTIAL_MIN_UPDATE_MS = 100;
 constexpr double CELESTIAL_MAX_TARGET_RATE_DPS = 1.0;
 uint32_t celestialSequence = 0, celestialUpdatedAt = 0, celestialDeadlineMs = LEG_TIMEOUT_MS;
-double celestialYawReference = 0;
 double celestialInitialErrors[2] = {}, celestialTimingAngles[2] = {};
 double celestialPulsesPerDegree[2] = {};
 int32_t celestialTimingSteps[2] = {};
@@ -29,7 +28,10 @@ struct CelestialTrackAxis {
     double conversion = 0, filteredError = 0, correction = 0;
     double progressError = 0;
     uint32_t servicedAt = 0, progressAt = 0, rateMilliHz = 0;
+    uint32_t brakeTimeoutMs = BRAKING_TIMEOUT_MS, launchAt = 0;
     bool started = false;
+    bool runConfirmed = false, startRetried = false;
+    bool zeroStopping = false;
 };
 CelestialTrackAxis celestialTrackAxes[2];
 double celestialTargetRate[2] = {};
@@ -134,12 +136,52 @@ void celestialRecordTrustedBno() {
         }
     }
 }
+void brakeCelestialTrackAxis(Axis &axis, uint32_t now, bool zeroRate = false) {
+    auto &track = celestialTrackAxes[axis.pitch ? 1 : 0];
+    // FAS 1.2.7 finishes pause_ticks_left before normal deceleration. The
+    // applied period can still be longer than the latest requested period.
+    // Capture both BEFORE stopMove(); never extend this deadline while waiting.
+    const uint32_t appliedUs = track.runConfirmed ? axis.motor->getPeriodInUsAfterCommandsCompleted() : 0;
+    const uint32_t requestedMs = track.rateMilliHz ?
+        (1000000UL + track.rateMilliHz - 1) / track.rateMilliHz : 0;
+    // Include FAS's remaining ramp steps as well as the in-flight interval:
+    // even at sub-hertz speed its integer ramp state can retain one stop step.
+    const uint32_t stopSteps = axis.motor->stepsToStop();
+    // Zero demand must cancel a pending ultra-slow schedule, not preserve it
+    // for another step period. Only use queue-draining forceStop when the
+    // applied period exceeds the normal brake budget and <=1 ramp step remains.
+    // Faster motion retains normal deceleration. Never reset motor position.
+    const bool cancelPause = zeroRate && appliedUs >= BRAKING_TIMEOUT_MS * 1000UL && stopSteps <= 1;
+    track.brakeTimeoutMs = BRAKING_TIMEOUT_MS + (cancelPause ? 0 :
+        (1 + stopSteps) * std::max((appliedUs + 999) / 1000, requestedMs));
+    if (cancelPause) {
+        // Queue-only draining needs no new ramp stop flag (which could poison
+        // a later start). Issue at most one request for this zero transition.
+        if (axis.motor->isRampGeneratorActive()) axis.motor->forceStop();
+    } else axis.motor->stopMove();
+    track.zeroStopping = zeroRate;
+    axis.commandAt = now;
+    setMotion(axis, zeroRate ? Motion::TRACK_ZERO : Motion::BRAKING);
+    char line[300];
+    snprintf(line, sizeof(line),
+        "CELESTIAL_AXIS_STOP id=%lu axis=%s reason=%s method=%s last_mHz=%lu applied_period_us=%lu stop_steps=%lu start_ms=%lu timeout_ms=%lu running=%s\n",
+        static_cast<unsigned long>(celestialId), axis.pitch ? "PITCH" : "YAW",
+        zeroRate ? "ZERO_RATE" : "REVERSAL_OR_FEEDBACK_HOLD", cancelPause ? "CANCEL_PAUSE" : "DECELERATE",
+        static_cast<unsigned long>(track.rateMilliHz), static_cast<unsigned long>(appliedUs),
+        static_cast<unsigned long>(stopSteps), static_cast<unsigned long>(now),
+        static_cast<unsigned long>(track.brakeTimeoutMs), axis.motor->isRunning() ? "YES" : "NO");
+    queueText(line);
+}
 void holdCelestialForEncoder(uint32_t now) {
     Axis *axes[2] = {&yawAxis, &pitchAxis};
     for (Axis *axis : axes) {
         if (!axis->motor->isRunning()) continue;
+        if (axis->motion == Motion::TRACK) {
+            brakeCelestialTrackAxis(*axis, now);
+            continue;
+        }
         axis->motor->stopMove();
-        if (axis->motion == Motion::SLEW || axis->motion == Motion::TRACK) {
+        if (axis->motion == Motion::SLEW) {
             axis->motion = Motion::BRAKING;
             axis->commandAt = now;
         }
@@ -359,13 +401,8 @@ void celestialSafety() {
         stopCelestial("celestial GOTO displacement/response deadline expired"); return;
     }
     const double currentPitch = celestialEncoderMode ? pitchAxis.current : physicalPitch();
-    const double currentYaw = celestialEncoderMode ? yawAxis.current : heading.continuous;
     if (fabs(currentPitch) >= MAX_USABLE_PITCH_DEG || fabs(pitchAxis.target) >= MAX_USABLE_PITCH_DEG) {
         stopCelestial("pitch reached +/-75 degree guard"); return;
-    }
-    if (northTravelGuardExceeded(currentYaw - celestialYawReference,
-            yawAxis.target - celestialYawReference)) {
-        stopCelestial("yaw current/target exceeds fixed +/-185 degree travel guard"); return;
     }
 }
 void enterCelestialTracking() {
@@ -397,11 +434,8 @@ void beginCelestial(uint32_t id, double yaw, double pitch) {
     if (fabs(pitch) >= MAX_USABLE_PITCH_DEG || fabs(physicalPitch()) >= MAX_USABLE_PITCH_DEG) {
         rejectCelestial(id, "current and target pitch must be inside +/-75 degrees"); return;
     }
+    // Preserve the shortest heading move without a fixed yaw travel envelope.
     const double targetYaw = heading.continuous + shortestDifference(yaw, orientation.heading);
-    const double reference = referenceSet ? northTargetContinuous : pitchReadyYaw;
-    if (northTravelGuardExceeded(heading.continuous - reference, targetYaw - reference)) {
-        rejectCelestial(id, "shortest yaw path exceeds fixed +/-185 degree travel guard"); return;
-    }
     if (!bnoWatchdogReady || !motionWatchdog.clearTripWhenStopped()) {
         rejectCelestial(id, "orientation watchdog unavailable"); return;
     }
@@ -419,7 +453,7 @@ void beginCelestial(uint32_t id, double yaw, double pitch) {
     celestialId = id; celestialSequence = 0; celestialTracking = celestialFailed = false;
     celestialTrackAxes[0] = {}; celestialTrackAxes[1] = {};
     celestialTargetRate[0] = celestialTargetRate[1] = 0; celestialRateKnown = false;
-    celestialYawReference = reference; celestialTimingKnown = false; celestialDeadlineMs = LEG_TIMEOUT_MS;
+    celestialTimingKnown = false; celestialDeadlineMs = LEG_TIMEOUT_MS;
     celestialInitialErrors[0] = fabs(yawAxis.error); celestialInitialErrors[1] = fabs(pitchAxis.error);
     celestialTimingAngles[0] = heading.continuous; celestialTimingAngles[1] = physicalPitch();
     celestialTimingSteps[0] = yawMotor->getCurrentPosition(); celestialTimingSteps[1] = pitchMotor->getCurrentPosition();
@@ -469,10 +503,8 @@ void updateCelestial(uint32_t id, uint32_t sequence, double yaw, double pitch) {
         stopCelestial("target update exceeds 1 degree/s angular rate bound"); return;
     }
     const double targetYaw = yawAxis.target + yawDelta;
-    const double currentYaw = celestialEncoderMode ? yawAxis.current : heading.continuous;
-    if (fabs(pitch) >= MAX_USABLE_PITCH_DEG ||
-        northTravelGuardExceeded(currentYaw - celestialYawReference, targetYaw - celestialYawReference)) {
-        stopCelestial("updated target exceeds pitch/yaw travel guard"); return;
+    if (fabs(pitch) >= MAX_USABLE_PITCH_DEG) {
+        stopCelestial("updated target exceeds pitch travel guard"); return;
     }
     shiftCelestialTarget(yawAxis, targetYaw); shiftCelestialTarget(pitchAxis, pitch);
     const double seconds = elapsed / 1000.0;
@@ -490,11 +522,22 @@ void updateCelestial(uint32_t id, uint32_t sequence, double yaw, double pitch) {
 void serviceCelestialTrackAxis(Axis &axis, uint32_t now, uint32_t sampleAt) {
     const unsigned index = axis.pitch ? 1 : 0;
     auto &track = celestialTrackAxes[index];
+    if (axis.motion == Motion::TRACK_ZERO && track.zeroStopping) {
+        if (axis.motor->isRunning()) {
+            if (now - axis.commandAt >= track.brakeTimeoutMs)
+                stopCelestial("TRACK zero-rate stop timed out");
+            return;
+        }
+        if (!axis.observing) { axis.observing = true; axis.stoppedAt = now; return; }
+        if (!sampleAtOrAfter(sampleAt, axis.stoppedAt + PRECISION_OBSERVE_MS)) return;
+        axis.observing = false; track.zeroStopping = false;
+        track.runConfirmed = false;
+    }
     // A sensor pause or direction reversal must finish braking and observe a
     // fresh stopped sample before continuous motion is allowed again.
     if (axis.motion == Motion::BRAKING || axis.finiteActive || axis.observing) {
         if (axis.motor->isRunning()) {
-            if (now - axis.commandAt >= BRAKING_TIMEOUT_MS)
+            if (now - axis.commandAt >= track.brakeTimeoutMs)
                 stopCelestial("TRACK braking timed out");
             return;
         }
@@ -504,10 +547,35 @@ void serviceCelestialTrackAxis(Axis &axis, uint32_t now, uint32_t sampleAt) {
         }
         if (!sampleAtOrAfter(sampleAt, axis.stoppedAt + PRECISION_OBSERVE_MS)) return;
         axis.observing = false;
+        // No progress is expected during an intentional long brake. Give the
+        // resumed servo its normal progress window, without changing its filter.
+        track.progressAt = now; track.progressError = fabs(track.filteredError);
         setMotion(axis, Motion::HOLD);
         return;
     }
     if (!celestialRateKnown) return;
+    if (axis.motion == Motion::TRACK && !track.runConfirmed) {
+        // runForward/Backward activates the ramp synchronously, not the queue.
+        // A pending forceStop flag can consume that first run in FAS 1.2.7.
+        // Queue execution (including zero-step pauses) confirms launch; a STEP
+        // pulse is NOT required. Retry once only before that acknowledgment,
+        // only when fully idle, and within the original bounded start window.
+        if (axis.motor->isQueueRunning()) track.runConfirmed = true;
+        else {
+            if (now - axis.commandAt >= BRAKING_TIMEOUT_MS) {
+                stopCelestial("TRACK motor failed to start"); return;
+            }
+            if (!axis.motor->isRunning() && now - track.launchAt >= PRECISION_OBSERVE_MS) {
+                if (track.startRetried) { stopCelestial("TRACK motor failed to start"); return; }
+                track.startRetried = true;
+                track.launchAt = now;
+                const int result = static_cast<int>(axis.slewDirection > 0 ?
+                    axis.motor->runForward() : axis.motor->runBackward());
+                if (result != static_cast<int>(MOVE_OK)) stopCelestial("TRACK continuous rate command rejected");
+            }
+            return;
+        }
+    }
     if (track.started && now - track.servicedAt < CELESTIAL_RATE_SERVICE_MS) return;
     const double seconds = track.started ? fmin(0.25, (now - track.servicedAt) / 1000.0) : 0.1;
     track.servicedAt = now;
@@ -524,15 +592,6 @@ void serviceCelestialTrackAxis(Axis &axis, uint32_t now, uint32_t sampleAt) {
     track.correction += fmax(-ramp, fmin(ramp, desiredCorrection - track.correction));
     const double rate = fmax(-CELESTIAL_MAX_TARGET_RATE_DPS,
         fmin(CELESTIAL_MAX_TARGET_RATE_DPS, celestialTargetRate[index] + track.correction));
-    // At photographic rates the old burst progress deadline is inappropriate.
-    // Still fail safely if a significant filtered residual makes no progress.
-    const double error = fabs(track.filteredError);
-    if (!track.started || error <= TOLERANCE_DEG || error < track.progressError - 0.1) {
-        track.progressAt = now; track.progressError = error;
-    } else if (now - track.progressAt >= CELESTIAL_TRACK_PROGRESS_MS) {
-        stopCelestial("TRACK filtered position error made no progress for 60000 ms"); return;
-    }
-    track.started = true;
     const int direction = bnoSlewStepDirection(rate, axis.pitch);
     const double requested = fmin(limitedSpeed(axis, slewSpeed(axis.pitch)) * 1000.0,
         fabs(rate) * track.conversion * 1000.0);
@@ -540,14 +599,27 @@ void serviceCelestialTrackAxis(Axis &axis, uint32_t now, uint32_t sampleAt) {
     // an unrepresentable rate as zero; never clamp UP and overdrive an axis.
     const uint32_t milliHz = requested >= CELESTIAL_MIN_RATE_MILLIHZ ?
         static_cast<uint32_t>(lround(requested)) : 0;
-    if (axis.motion == Motion::TRACK && (!milliHz || direction != axis.slewDirection)) {
-        axis.motor->stopMove(); axis.commandAt = now;
-        setMotion(axis, Motion::BRAKING); return;
+    // Progress is expected only when motion is requested. Continue evaluating
+    // the unchanged residual filter in ZERO so a new nonzero demand can resume.
+    const double error = fabs(track.filteredError);
+    if (!milliHz || axis.motion == Motion::TRACK_ZERO || !track.started ||
+            error <= TOLERANCE_DEG || error < track.progressError - 0.1) {
+        track.progressAt = now; track.progressError = error;
+    } else if (now - track.progressAt >= CELESTIAL_TRACK_PROGRESS_MS) {
+        stopCelestial("TRACK filtered position error made no progress for 60000 ms"); return;
     }
-    if (!milliHz) return;
+    track.started = true;
+    if (!milliHz) {
+        if (axis.motion == Motion::TRACK) brakeCelestialTrackAxis(axis, now, true);
+        else if (axis.motion != Motion::TRACK_ZERO) setMotion(axis, Motion::TRACK_ZERO);
+        return;
+    }
     if (axis.motion == Motion::TRACK && !axis.motor->isRunning()) {
         if (now - axis.commandAt < PRECISION_OBSERVE_MS) return;
         stopCelestial("TRACK motor stopped unexpectedly"); return;
+    }
+    if (axis.motion == Motion::TRACK && direction != axis.slewDirection) {
+        brakeCelestialTrackAxis(axis, now); return;
     }
     if (axis.motion == Motion::TRACK && track.rateMilliHz == milliHz) return;
     int result = axis.motor->setAcceleration(ACCELERATION);
@@ -559,6 +631,8 @@ void serviceCelestialTrackAxis(Axis &axis, uint32_t now, uint32_t sampleAt) {
     if (result != static_cast<int>(MOVE_OK)) { stopCelestial("TRACK continuous rate command rejected"); return; }
     track.rateMilliHz = milliHz;
     if (axis.motion != Motion::TRACK) {
+        track.runConfirmed = track.startRetried = false;
+        track.launchAt = now;
         axis.slewDirection = direction; axis.commandAt = now;
         setMotion(axis, Motion::TRACK);
     }
@@ -567,10 +641,8 @@ void serviceCelestialTracking(uint32_t now, uint32_t sampleAt) {
     celestialSafety();
     if (poseStopping || !celestialControlFeedbackReady()) return;
     const double seconds = (now - celestialUpdatedAt) / 1000.0;
-    if (fabs(pitchAxis.target + celestialTargetRate[1] * seconds) >= MAX_USABLE_PITCH_DEG ||
-        northTravelGuardExceeded(yawAxis.current - celestialYawReference,
-            yawAxis.target + celestialTargetRate[0] * seconds - celestialYawReference)) {
-        stopCelestial("extrapolated TRACK target exceeds pitch/yaw travel guard"); return;
+    if (fabs(pitchAxis.target + celestialTargetRate[1] * seconds) >= MAX_USABLE_PITCH_DEG) {
+        stopCelestial("extrapolated TRACK target exceeds pitch travel guard"); return;
     }
     serviceCelestialTrackAxis(yawAxis, now, sampleAt);
     if (!poseStopping) serviceCelestialTrackAxis(pitchAxis, now, sampleAt);

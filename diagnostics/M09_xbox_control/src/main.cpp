@@ -54,7 +54,7 @@ constexpr int32_t PITCH_TRAVEL_ACCELERATION = 2400;
 enum class Operation { NORTH_LEVEL, POSE, MANUAL, LEVEL, NORTH, CELESTIAL };
 
 enum class Phase { STARTUP, BASELINE, MOVING, SETTLING, COMPLETE, ABORTED, MANUAL };
-enum class Motion { PRECISION, SLEW, BRAKING, HOLD, TRACK };
+enum class Motion { PRECISION, SLEW, BRAKING, HOLD, TRACK, TRACK_ZERO };
 struct Axis {
     FastAccelStepper *motor = nullptr;
     bool pitch = false, settled = false, confirmed = false;
@@ -257,6 +257,7 @@ const char *motionText(const Axis &axis) {
     case Motion::BRAKING: return "BRAKING";
     case Motion::HOLD: return "HOLD";
     case Motion::TRACK: return "TRACK";
+    case Motion::TRACK_ZERO: return "TRACK_ZERO";
     }
     return "UNKNOWN";
 }

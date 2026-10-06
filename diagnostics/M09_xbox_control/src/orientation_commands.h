@@ -19,19 +19,6 @@ double alignmentPauseHeading = 0, alignmentPauseContinuous = 0;
 int32_t alignmentTimingSteps = 0;
 uint8_t pendingOrientation = 0; // 1=LEVEL, 2=NORTH; only during normal manual braking.
 
-bool northTravelGuardExceeded(double currentOffset, double targetOffset) {
-    // Both values are absolute unwrapped positions relative to the fixed north
-    // center. targetOffset is the endpoint after the chosen shortest heading
-    // move; the size of that move is not the travel-envelope measurement.
-    return fabs(currentOffset) >= RELATIVE_LIMIT_DEG || fabs(targetOffset) >= RELATIVE_LIMIT_DEG;
-}
-const char *northTravelViolation(double currentOffset, double targetOffset) {
-    const bool currentOutside = fabs(currentOffset) >= RELATIVE_LIMIT_DEG;
-    const bool targetOutside = fabs(targetOffset) >= RELATIVE_LIMIT_DEG;
-    if (currentOutside && targetOutside) return "current_position_and_projected_target_outside";
-    return currentOutside ? "current_position_outside" : "projected_target_outside";
-}
-
 Axis &alignmentAxis() { return operation == Operation::LEVEL ? pitchAxis : yawAxis; }
 uint32_t alignmentSpeed(bool pitch) { return pitch ? PITCH_TRAVEL_SPEED_HZ : YAW_SLEW_SPEED_HZ; }
 int32_t alignmentAcceleration(bool pitch) { return pitch ? PITCH_TRAVEL_ACCELERATION : YAW_SLEW_ACCELERATION; }
@@ -161,16 +148,6 @@ bool alignmentSafety() {
     if (operation == Operation::LEVEL && bnoValid && fabs(physicalPitch()) >= LEVEL_SENSOR_DOMAIN_LIMIT_DEG) {
         abortAlignment("physical pitch reached BNO Euler limit margin (+/-89 degrees)"); return false;
     }
-    if (operation == Operation::NORTH && bnoValid && northTravelGuardExceeded(
-            heading.continuous - alignmentYawReference, yawAxis.target - alignmentYawReference)) {
-        char reason[240];
-        snprintf(reason, sizeof(reason),
-            "measured yaw travel guard exceeded: current_position_offset_deg=%.3f projected_target_offset_deg=%.3f violation=%s guard_basis=absolute_unwrapped_envelope limit_abs_offset_deg=%.1f",
-            heading.continuous - alignmentYawReference, yawAxis.target - alignmentYawReference,
-            northTravelViolation(heading.continuous - alignmentYawReference, yawAxis.target - alignmentYawReference),
-            RELATIVE_LIMIT_DEG);
-        abortAlignment(reason); return false;
-    }
     return !poseStopping;
 }
 void rejectOrientation(const char *command, const char *reason) {
@@ -201,20 +178,11 @@ void beginOrientation(bool level) {
     if (!bnoWatchdogReady || !motionWatchdog.clearTripWhenStopped()) {
         rejectOrientation(name, "orientation watchdog unavailable"); return;
     }
-    // Keep the controller's shortest heading move. Its unwrapped endpoint is
-    // checked below against the fixed mechanical envelope around north.
+    // Preserve the shortest heading move without a fixed yaw travel envelope.
     const double target = level ? heading.continuous : heading.continuous + shortestDifference(0, orientation.heading);
     const double reference = referenceSet ? northTargetContinuous : pitchReadyYaw;
     const double currentOffset = heading.continuous - reference;
     const double targetOffset = target - reference;
-    if (!level && northTravelGuardExceeded(currentOffset, targetOffset)) {
-        char detail[280];
-        snprintf(detail, sizeof(detail),
-            "NORTH yaw travel guard exceeded: current_position_offset_deg=%.3f projected_target_offset_deg=%.3f shortest_move_deg=%.3f violation=%s guard_basis=absolute_unwrapped_envelope limit_abs_offset_deg=%.1f",
-            currentOffset, targetOffset, targetOffset - currentOffset,
-            northTravelViolation(currentOffset, targetOffset), RELATIVE_LIMIT_DEG);
-        rejectOrientation(name, detail); return;
-    }
     operation = level ? Operation::LEVEL : Operation::NORTH;
     poseActive = poseNeedsBno = true; poseStopping = alignmentPaused = false;
     finalPrinted = false; phase = Phase::MOVING; window.active = false;

@@ -131,3 +131,91 @@ than rounded upward. Ordinary rates are rounded to the nearest milliHz.
 Microstep/cradle resolution, backlash, BNO drift and provisional calibration accuracy
 still limit image stability. Software simulation and compilation do not replace
 powered validation. No firmware upload is part of this change.
+
+## Sub-hertz braking and restart correction (2026-10-06)
+
+The trace below is against the installed FastAccelStepper **1.2.7** source,
+not inferred from the physical motor's apparent motion. Changes cover celestial
+TRACK's transition state, zero-demand progress handling, stop diagnostics and
+celestial cancellation's force-stop repetition. The rate/residual calculation,
+motor mappings, Python, GOTO, LEVEL and NORTH remain unchanged. No firmware was
+uploaded.
+
+| Transition | Firmware / FastAccelStepper path |
+| --- | --- |
+| Start | Configure acceleration and milliHz; `runForward()` / `runBackward()` calls `RampGenerator::startRun()`. This activates the ramp before the background task fills/starts the hardware queue. |
+| Rate update | `setSpeedInMilliHz()` and `applySpeedAcceleration()` publish parameters. An existing long `pause_ticks_left` is still processed before the next step's timing changes. |
+| Zero demand | Rates below 5 milliHz enter TRACK_ZERO. A pending period of at least 3 seconds with at most one ramp step remaining is canceled with one `forceStop()` request while the ramp is active; faster motion uses normal deceleration. Queue draining and a fresh stopped sample at least 100 ms later must complete before another run. |
+| Reversal | Nonzero direction changes call `stopMove()` and mark the axis BRAKING. An opposite-direction run waits until the motor is idle and a fresh stopped sample at least 100 ms later has arrived. |
+| Normal braking | `stopMove()` sets `force_stop`; `_getNextCommand()` emits remaining zero-step pauses before it evaluates deceleration. An integer ramp-down step can retain another full slow period. |
+| Running | `isRunning()` is true when the queue runs, the ramp is active, or the queue is nonempty. Tens of seconds without a STEP edge can therefore be entirely normal. |
+| Forced stop | `forceStop()` sets `force_immediate_stop`; the ramp task consumes it, clears it and stops generating commands. Already queued short commands still drain. |
+| Restart hazard | Calling `forceStop()` again while only the queue is draining can leave a new flag after ramp idle. `startRun()` clears ordinary `force_stop`, but not this immediate-stop flag. The next ramp service consumes the new continuous start without issuing a queue command. |
+
+Previously BRAKING failed after a fixed 3000 ms. TRACK's first successful
+`run*()` return also immediately established expected-running state; finding
+`isRunning() == false` after 100 ms failed the session. Admission checked all
+motors idle and reset the firmware axes, but that did not clear the library's
+pending immediate-stop flag.
+
+Normally decelerated internal TRACK braking captures this deadline once, before
+`stopMove()`:
+
+`3000 ms + (1 + stepsToStop()) * max(applied period, last requested period)`
+
+Periods are rounded upward to milliseconds. The applied period is read from
+`getPeriodInUsAfterCommandsCompleted()` after queue-confirmed launch; the request
+is derived from the last nonzero milliHz command. This covers an older slow
+interval even if a faster request has just been submitted, plus the remaining
+ramp steps and the existing scheduling margin. The deadline is not renewed
+while waiting. At 0.020 Hz with one ramp step, it is 103 seconds, not 3 seconds.
+Reversal may consequently take that long; this retains normal deceleration and
+does not insert dummy steps or alter pulse generation. A stuck brake still
+fails at the captured deadline. Intentional braking time is excluded from the
+resumed servo's existing 60-second no-progress window.
+
+Zero-demand cancellation of a slow pending pause instead uses the original
+3000 ms stop budget. It never resets the motor position or repeatedly requests
+a forced stop while the queue drains. TRACK_ZERO continues evaluating the
+residual filter and can resume in either direction after stop confirmation.
+Zero demand, including feed-forward and residual correction canceling each
+other, does not count as a failure to make position progress. The 5 milliHz
+minimum is unchanged. Each transition emits `CELESTIAL_AXIS_STOP` with its
+reason, stop method, previous requested rate, applied period, remaining ramp
+steps and captured timeout.
+
+A start is now unconfirmed until `isQueueRunning()` acknowledges execution,
+including pause-only commands; it does not wait for a physical STEP. Before
+that acknowledgment only, one retry is permitted after at least 100 ms and
+only with `isRunning() == false` (ramp and queue both idle). Both attempts share
+a 3000 ms startup deadline. A second idle failure or missing queue acknowledgment
+fails with `TRACK motor failed to start`. Once confirmed, the existing
+`TRACK motor stopped unexpectedly` check remains and never retries a lost run.
+New runs reset the launch confirmation/retry state; new sessions reset all
+TRACK state. Celestial cancellation issues forced stops once, rather than
+continually relatching them while the queues drain.
+
+Operator STOP, host joystick takeover via STOP, and lease expiry still use the
+original cancellation path with its 3000 ms braking limit and forced-stop
+fallback. The **3000 ms celestial update lease is unchanged**, including during
+long internal brakes. Sensor pause/fallback uses the same normal TRACK brake;
+other operation modes retain their prior braking behavior.
+
+Validation includes `fas_low_rate_test.cpp`, which compiles the unmodified
+installed ramp implementation with its PC backend (16 MHz ticks): it reproduces
+about 100 seconds of normal stopping at 0.020 Hz, verifies an older pending
+period survives a rate update, and reproduces/clears the forced-stop restart
+flag without dummy steps. `celestial_low_rate_test.cpp` exercises the real
+firmware dispatcher with long pauses and asynchronous queue draining: 0.005
+and 0.020 Hz motion, zero/below-minimum rates, reversal, pending-period capture,
+bounded braking/start failure, confirmed unexpected stops, forced-stop restart,
+STOP/manual handoff, lease expiry and sensor pause/recovery. These deterministic
+tests do not emulate the ESP32 interrupt scheduler or validate physical tracking
+accuracy; powered validation remains outstanding.
+
+`celestial_zero_rate_test.cpp` additionally checks exact feed-forward/correction
+cancellation, demand fluctuating within the zero band, a 210-second zero hold,
+same-direction restart, both reversal directions through zero, failed stopping,
+unexpected running-motor loss, STOP/manual takeover and lease expiry. The
+installed-library test also checks cancellation of an unqueued slow pause and
+subsequent starts in both directions without relatching an immediate stop.

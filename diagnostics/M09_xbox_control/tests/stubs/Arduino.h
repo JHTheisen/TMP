@@ -32,6 +32,11 @@ struct PlantMotor {
     uint32_t stoppedAt = 0;
     int32_t acceleration = 240;
     bool frozen = false, neverStops = false, needsStoppedSample = false, idleForceStopLatched = false;
+    // Opt-in FAS sub-hertz fixture: a normal stop drains the current step's
+    // pause, while forceStop drains only the already queued short commands.
+    bool stepPauses = false, failContinuousStart = false, queueNeverStarts = false, forceStopFails = false;
+    uint32_t nextStepAt = 0, appliedPeriodUs = 0, forceDrainUntil = 0;
+    unsigned brakingSteps = 0;
 };
 struct MoveCommand {
     uint8_t stepPin;
@@ -48,6 +53,7 @@ static uint32_t continuousStartDelayMs = 0;
 // watchdog recovery deliberately repeats forceStop while draining its queue;
 // that does not assert every real driver permanently drops its next run.
 static bool latchIdleForceStop = false;
+static uint32_t forceStopDrainMs = 0;
 // Independent GPIO latch fixture: intentionally not derived from motor sign.
 static uint32_t gpioOutput = 0;
 static PlantMotor motors[3];
@@ -86,6 +92,31 @@ inline double actualYaw() { return baselineYaw + motors[0].degrees + yawDisturba
 inline double actualPitch() { return baselinePitch + motors[1].degrees + pitchDisturbance; }
 inline void integrate(PlantMotor &motor) {
     if (motor.drive == Drive::IDLE) return;
+    if (motor.stepPauses && motor.drive != Drive::FINITE) {
+        if (static_cast<int32_t>(now - motor.nextStepAt) < 0) return;
+        if (motor.drive == Drive::BRAKING) {
+            if (motor.brakingSteps) {
+                --motor.brakingSteps;
+                motor.nextStepAt = now + (motor.appliedPeriodUs + 999) / 1000;
+                motor.position += motor.direction;
+                if (!motor.frozen) motor.degrees += motor.direction * motor.degreesPerStep *
+                    motor.physicalSign * motor.activePhysicalMultiplier;
+                return;
+            }
+            if (!motor.neverStops) {
+                motor.drive = Drive::IDLE; motor.velocity = 0;
+                motor.stoppedAt = now; motor.needsStoppedSample = true;
+            }
+            return;
+        }
+        motor.position += motor.direction;
+        if (!motor.frozen) motor.degrees += motor.direction * motor.degreesPerStep *
+            motor.physicalSign * motor.activePhysicalMultiplier;
+        motor.velocity = motor.direction * motor.speed;
+        motor.appliedPeriodUs = static_cast<uint32_t>(1000000.0 / motor.speed);
+        motor.nextStepAt = now + (motor.appliedPeriodUs + 999) / 1000;
+        return;
+    }
     const double remaining = motor.target - motor.position;
     double desired = motor.direction * static_cast<double>(motor.speed);
     if (motor.drive == Drive::BRAKING) desired = 0;

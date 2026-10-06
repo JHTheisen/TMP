@@ -88,11 +88,40 @@ int main(int argc, char **argv) {
     } else if (scenario == "busy") {
         command("JOG 0 0 0"); command("JOG 200 200 0");
         command("CELESTIAL_GOTO 71 45 20"); CHECK(manualActive && !poseActive);
-    } else if (scenario == "yaw_guard") {
-        heading.continuous = northTargetContinuous + 184.5;
-        orientation.heading = wrap360(heading.first + heading.continuous);
-        beginCelestial(71, wrap360(orientation.heading + 1), 20);
-        CHECK(!poseActive && commandIdle());
+    } else if (scenario == "goto_sun" || scenario == "goto_yaw_outside") {
+        // Both shortest-path endpoints exceed the former +185 envelope;
+        // the second case also starts outside it.
+        simulated::yawDisturbance = scenario == "goto_sun" ? 140 : 170;
+        advance(100);
+        const double reference = northTargetContinuous;
+        const double initialYaw = heading.continuous;
+        targetYaw = 217.3; targetPitch = 33.6;
+        begin();
+        CHECK(fabs(yawAxis.target - initialYaw - (scenario == "goto_sun" ? 57.3 : 27.3)) < 0.001);
+        CHECK(yawAxis.target - reference > 185);
+        track(); preserved();
+        CHECK(heading.continuous - reference > 185);
+        command("STOP"); recover();
+    } else if (scenario == "track_yaw_positive_unbounded" || scenario == "track_yaw_negative_unbounded") {
+        const int sign = scenario == "track_yaw_positive_unbounded" ? 1 : -1;
+        simulated::yawDisturbance = sign * 100; advance(100);
+        simulated::yawDisturbance = sign * 184.99 - simulated::baselineYaw; advance(100);
+        const double reference = northTargetContinuous;
+        targetYaw = sign * 184.99; targetPitch = 8;
+        begin(); track();
+        targetYaw += sign * 0.009; advance(1000); preserved();
+        heartbeat = false;
+        advance(2000); preserved(); // Extrapolated target crosses +/-185 before the next update.
+        CHECK(fabs(yawAxis.target + celestialTargetRate[0] * ((millis()-celestialUpdatedAt)/1000.0) - reference) > 185);
+        targetYaw += sign * 0.15; update(); advance(25); preserved();
+        CHECK(fabs(yawAxis.target-reference)>185);
+        heartbeat = true;
+        for (unsigned second=0; second<10; ++second) {
+            targetYaw += sign * 0.1; advance(1000); preserved();
+        }
+        CHECK(fabs(yawAxis.current-reference)>185);
+        CHECK(yawAxis.motion==Motion::TRACK && yawAxis.slewDirection==-sign);
+        command("STOP"); recover();
     } else {
         const bool bnoOutageScenario = scenario == "track_stale" || scenario == "track_accuracy" ||
             scenario == "track_reset" || scenario == "bad_feedback" || scenario == "track_unavailable" ||
