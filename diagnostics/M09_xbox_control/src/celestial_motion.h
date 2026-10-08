@@ -1,4 +1,4 @@
-// Host-computed BNO-frame targets. GOTO uses the existing POSE controller;
+// Host-computed encoder-frame targets. GOTO uses the existing POSE controller;
 // TRACK uses configured continuous rates through the same pulse service.
 // No astronomy, sensor I/O or motor sign changes.
 constexpr uint32_t CELESTIAL_LEASE_MS = 3000;
@@ -39,149 +39,8 @@ bool celestialRateKnown = false;
 uint32_t celestialRateLoggedAt = 0;
 void celestialRateTelemetry();
 
-// A celestial session starts in the established BNO frame.  While that sensor
-// is trustworthy, movement teaches the signed conversion from each wrapped
-// AS5600 to its corresponding cradle axis (Bus A yaw, Bus B pitch). Acquisition
-// can use BNO; TRACK always latches the encoder frame, never BNO fast feedback.
-constexpr uint32_t CELESTIAL_ENCODER_STALE_MS = 150;
-constexpr double CELESTIAL_ENCODER_TICK_DEG = 360.0 / 4096.0;
-struct CelestialEncoderAxis {
-    bool initialized = false, scaleKnown = false, calibrationAnchored = false;
-    uint16_t raw = 0;
-    int64_t ticks = 0, referenceTicks = 0, calibrationTicks = 0;
-    int32_t calibrationSteps = 0;
-    uint32_t lastGoodMs = 0;
-    double referenceAngle = 0, calibrationAngle = 0;
-    double degreesPerTick = 0, bestCalibrationTravel = 0;
-};
-CelestialEncoderAxis celestialEncoderAxes[2];
-double celestialLearnedEncoderScale[2] = {};
-uint32_t celestialCalibrationStoppedAt = 0;
-bool celestialEncoderMode = false, celestialEncoderPaused = false;
-bool celestialBnoHealthy = true, celestialBnoRecoveryReported = false;
-uint32_t celestialEncoderGeneration = 0, celestialEncoderServicedGeneration = 0;
-uint32_t celestialEncoderPauseAt = 0;
-double celestialRecoveryYawDiscrepancy = 0, celestialRecoveryPitchDiscrepancy = 0;
-
-int celestialEncoderDelta(uint16_t current, uint16_t previous) {
-    int delta = static_cast<int>(current) - static_cast<int>(previous);
-    if (delta > 2048) delta -= 4096;
-    if (delta < -2048) delta += 4096;
-    return delta;
-}
-bool observeCelestialEncoder(unsigned index) {
-    const auto &sample = encoders.state(index);
-    auto &axis = celestialEncoderAxes[index];
-    if (!sample.hasSample || !sample.valid || !sample.magnetGood()) return false;
-    if (!axis.initialized) {
-        axis.initialized = true; axis.raw = sample.raw; axis.lastGoodMs = sample.lastGoodMs;
-        axis.calibrationSteps = (index ? pitchMotor : yawMotor)->getCurrentPosition();
-        axis.calibrationTicks = axis.ticks;
-        ++celestialEncoderGeneration;
-        return true;
-    }
-    if (sample.lastGoodMs == axis.lastGoodMs) return true;
-    axis.ticks += celestialEncoderDelta(sample.raw, axis.raw);
-    axis.raw = sample.raw; axis.lastGoodMs = sample.lastGoodMs;
-    ++celestialEncoderGeneration;
-    return true;
-}
-bool celestialEncoderAxisReady(unsigned index, uint32_t now) {
-    const auto &state = encoders.state(index);
-    const auto &axis = celestialEncoderAxes[index];
-    return axis.initialized && axis.scaleKnown && state.valid && state.hasSample && state.magnetGood() &&
-        state.ageMs(now) < CELESTIAL_ENCODER_STALE_MS;
-}
-bool celestialEncoderFeedbackAvailable(uint32_t now) {
-    return celestialEncoderAxisReady(0, now) && celestialEncoderAxisReady(1, now);
-}
-void learnStoppedCelestialEncoderScales() {
-    if (!yawMotor || !pitchMotor) return;
-    const uint32_t now = millis();
-    for (unsigned index = 0; index < 2; ++index) {
-        const auto &sample = encoders.state(index);
-        auto &axis = celestialEncoderAxes[index];
-        if (!sample.valid || !sample.magnetGood() ||
-            now - axis.lastGoodMs >= CELESTIAL_ENCODER_STALE_MS) axis.calibrationAnchored = false;
-    }
-    observeCelestialEncoder(0); observeCelestialEncoder(1);
-    if (celestialActive()) return; // Never change a tracking frame or scale.
-    if (!poseMotorsStopped()) { celestialCalibrationStoppedAt = now; return; }
-    if (now - celestialCalibrationStoppedAt < CELESTIAL_ENCODER_STALE_MS) return;
-    // Learn shaft-to-axis geometry from ordinary, completed motor movement.
-    // The existing powered STEP/cradle-degree calibration and signs stay fixed.
-    // Two stopped endpoints avoid pairing a delayed encoder sample with a
-    // moving motor count. No calibration move is commanded here.
-    for (unsigned index = 0; index < 2; ++index) {
-        auto &encoder = celestialEncoderAxes[index];
-        const auto &sample = encoders.state(index);
-        if (!encoder.initialized || !sample.valid || !sample.magnetGood() ||
-                sample.ageMs(now) >= CELESTIAL_ENCODER_STALE_MS) continue;
-        Axis &axis = index ? pitchAxis : yawAxis;
-        if (!encoder.calibrationAnchored) {
-            encoder.calibrationSteps = axis.motor->getCurrentPosition();
-            encoder.calibrationTicks = encoder.ticks;
-            encoder.calibrationAnchored = true;
-            continue;
-        }
-        if (celestialLearnedEncoderScale[index] != 0) continue;
-        const double steps = static_cast<double>(axis.motor->getCurrentPosition()) - encoder.calibrationSteps;
-        const double ticks = static_cast<double>(encoder.ticks - encoder.calibrationTicks);
-        if (fabs(steps) < 32 || fabs(ticks) < 16 || fabs(ticks) <= encoder.bestCalibrationTravel) continue;
-        const double scale = steps * bnoFeedbackStepSign(axis) /
-            ((index ? PITCH_TRACK_PULSES_PER_DEG : YAW_TRACK_PULSES_PER_DEG) * ticks);
-        if (!isfinite(scale) || fabs(scale) < 1e-6 || fabs(scale) > 1.0) continue;
-        celestialLearnedEncoderScale[index] = scale;
-        encoder.bestCalibrationTravel = fabs(ticks);
-    }
-}
-void initializeCelestialEncoders() {
-    celestialEncoderAxes[0] = {}; celestialEncoderAxes[1] = {};
-    celestialEncoderGeneration = celestialEncoderServicedGeneration = 0;
-    observeCelestialEncoder(0); observeCelestialEncoder(1);
-    const double angles[2] = {heading.continuous, physicalPitch()};
-    FastAccelStepper *motors[2] = {yawMotor, pitchMotor};
-    for (unsigned index = 0; index < 2; ++index) {
-        auto &axis = celestialEncoderAxes[index];
-        axis.referenceTicks = axis.calibrationTicks = axis.ticks;
-        axis.referenceAngle = axis.calibrationAngle = angles[index];
-        axis.calibrationSteps = motors[index]->getCurrentPosition();
-        axis.calibrationAnchored = true; // GOTO admission requires stopped motors.
-        axis.degreesPerTick = celestialLearnedEncoderScale[index];
-        axis.scaleKnown = axis.degreesPerTick != 0;
-    }
-    celestialEncoderMode = celestialEncoderPaused = false;
-    celestialBnoHealthy = true; celestialBnoRecoveryReported = false;
-    celestialEncoderPauseAt = 0;
-    celestialRecoveryYawDiscrepancy = celestialRecoveryPitchDiscrepancy = 0;
-}
-void updateCelestialEncoderCalibration(unsigned index, double bnoAngle) {
-    auto &encoder = celestialEncoderAxes[index];
-    if (!encoder.initialized || celestialLearnedEncoderScale[index] != 0) return;
-    const double tickTravel = static_cast<double>(encoder.ticks - encoder.calibrationTicks);
-    const double encoderTravel = fabs(tickTravel * CELESTIAL_ENCODER_TICK_DEG);
-    const double bnoTravel = bnoAngle - encoder.calibrationAngle;
-    if (encoderTravel < 0.5 || fabs(bnoTravel) < DIRECTION_RESPONSE_DEG ||
-        encoderTravel <= encoder.bestCalibrationTravel) return;
-    const double estimate = bnoTravel / tickTravel;
-    if (!isfinite(estimate) || fabs(estimate) < 1e-6 || fabs(estimate) > 1.0) return;
-    encoder.degreesPerTick = estimate;
-    encoder.scaleKnown = true;
-    encoder.bestCalibrationTravel = encoderTravel;
-}
-void celestialRecordTrustedBno() {
-    if (!celestialActive() || celestialEncoderMode || bnoAccuracy < BNO_MIN_ACCURACY) return;
-    observeCelestialEncoder(0); observeCelestialEncoder(1);
-    const double angles[2] = {heading.continuous, physicalPitch()};
-    for (unsigned index = 0; index < 2; ++index) {
-        updateCelestialEncoderCalibration(index, angles[index]);
-        auto &encoder = celestialEncoderAxes[index];
-        if (encoder.initialized) {
-            encoder.referenceTicks = encoder.ticks;
-            encoder.referenceAngle = angles[index];
-        }
-    }
-}
+// All acquisition and tracking feedback uses the same calibrated encoder frame.
+bool celestialControlFeedbackReady() { return fresh(millis()); }
 void brakeCelestialTrackAxis(Axis &axis, uint32_t now, bool zeroRate = false) {
     auto &track = celestialTrackAxes[axis.pitch ? 1 : 0];
     // FAS 1.2.7 finishes pause_ticks_left before normal deceleration. The
@@ -218,125 +77,6 @@ void brakeCelestialTrackAxis(Axis &axis, uint32_t now, bool zeroRate = false) {
         static_cast<unsigned long>(track.brakeTimeoutMs), axis.motor->isRunning() ? "YES" : "NO");
     queueText(line);
 }
-void holdCelestialForEncoder(uint32_t now) {
-    Axis *axes[2] = {&yawAxis, &pitchAxis};
-    for (Axis *axis : axes) {
-        if (!axis->motor->isRunning()) continue;
-        if (axis->motion == Motion::TRACK) {
-            brakeCelestialTrackAxis(*axis, now);
-            continue;
-        }
-        axis->motor->stopMove();
-        if (axis->motion == Motion::SLEW) {
-            axis->motion = Motion::BRAKING;
-            axis->commandAt = now;
-        }
-    }
-    if (!celestialEncoderPaused) {
-        for (auto &track : celestialTrackAxes) {
-            track.started = false; track.correction = track.filteredError = 0;
-        }
-        celestialEncoderPaused = true; celestialEncoderPauseAt = now;
-        char line[220];
-        snprintf(line, sizeof(line),
-            "CELESTIAL_DEGRADED id=%lu encoder_feedback=UNAVAILABLE action=HOLD session_preserved=YES\n",
-            static_cast<unsigned long>(celestialId));
-        queueText(line);
-    }
-}
-void resumeCelestialEncoderFeedback(uint32_t now) {
-    if (!celestialEncoderPaused) return;
-    const uint32_t paused = now - celestialEncoderPauseAt;
-    controlStartedAt += paused;
-    yawAxis.lastProgress += paused; pitchAxis.lastProgress += paused;
-    celestialEncoderPaused = false;
-    char line[220];
-    snprintf(line, sizeof(line),
-        "CELESTIAL_DEGRADED id=%lu encoder_feedback=AVAILABLE action=RESUME paused_ms=%lu\n",
-        static_cast<unsigned long>(celestialId), static_cast<unsigned long>(paused));
-    queueText(line);
-}
-void resumeCelestialBnoFeedback(uint32_t now) {
-    if (!celestialActive() || celestialEncoderMode || !celestialEncoderPaused ||
-        !fresh(now) || bnoAccuracy < BNO_MIN_ACCURACY || !poseMotorsStopped()) return;
-    const uint32_t paused = now - celestialEncoderPauseAt;
-    controlStartedAt += paused;
-    yawAxis.lastProgress = pitchAxis.lastProgress = now;
-    celestialEncoderPaused = false;
-    celestialBnoHealthy = true; celestialBnoRecoveryReported = false;
-    char line[240];
-    snprintf(line, sizeof(line),
-        "CELESTIAL_BNO id=%lu status=RECOVERED action=RESUME feedback=BNO paused_ms=%lu\n",
-        static_cast<unsigned long>(celestialId), static_cast<unsigned long>(paused));
-    queueText(line);
-}
-void celestialBnoUnavailable(const char *reason) {
-    if (!celestialActive() || poseStopping) return;
-    motionWatchdog.disarm();
-    observeCelestialEncoder(0); observeCelestialEncoder(1);
-    const uint32_t now = millis();
-    if (!celestialEncoderMode && celestialEncoderFeedbackAvailable(now)) {
-        celestialEncoderMode = true;
-        celestialEncoderServicedGeneration = celestialEncoderGeneration - 1;
-    }
-    if (celestialBnoHealthy) {
-        char line[300];
-        snprintf(line, sizeof(line),
-            "CELESTIAL_BNO id=%lu status=DEGRADED reason=%s feedback=%s session_preserved=YES\n",
-            static_cast<unsigned long>(celestialId), reason,
-            celestialEncoderMode ? "AS5600" : "BNO_PAUSED");
-        queueText(line);
-    }
-    celestialBnoHealthy = false; celestialBnoRecoveryReported = false;
-    if (!celestialEncoderMode || !celestialEncoderFeedbackAvailable(now)) holdCelestialForEncoder(now);
-}
-bool celestialUsingEncoderFeedback() { return celestialActive() && celestialEncoderMode; }
-bool celestialControlFeedbackReady() {
-    if (celestialEncoderPaused) return false;
-    if (!celestialUsingEncoderFeedback()) return fresh(millis());
-    return celestialEncoderFeedbackAvailable(millis());
-}
-bool serviceCelestialEncoderFeedback(uint32_t now, uint32_t &sampleAt, bool &newSample) {
-    observeCelestialEncoder(0); observeCelestialEncoder(1);
-    if (!celestialEncoderFeedbackAvailable(now)) {
-        holdCelestialForEncoder(now); newSample = false; return false;
-    }
-    resumeCelestialEncoderFeedback(now);
-    const auto &yawEncoder = celestialEncoderAxes[0];
-    const auto &pitchEncoder = celestialEncoderAxes[1];
-    yawAxis.current = yawEncoder.referenceAngle +
-        static_cast<double>(yawEncoder.ticks - yawEncoder.referenceTicks) * yawEncoder.degreesPerTick;
-    pitchAxis.current = pitchEncoder.referenceAngle +
-        static_cast<double>(pitchEncoder.ticks - pitchEncoder.referenceTicks) * pitchEncoder.degreesPerTick;
-    yawAxis.error = yawAxis.target - yawAxis.current;
-    pitchAxis.error = pitchAxis.target - pitchAxis.current;
-    sampleAt = now - std::max(encoders.state(0).ageMs(now), encoders.state(1).ageMs(now));
-    newSample = celestialEncoderGeneration != celestialEncoderServicedGeneration;
-    celestialEncoderServicedGeneration = celestialEncoderGeneration;
-    return true;
-}
-void celestialRecordBnoRecovery(const EulerAngles &sample, uint8_t accuracy, uint32_t sampleAt) {
-    bnoHealth.recordFresh(sampleAt, false);
-    orientation = sample; bnoAccuracy = accuracy; bnoValid = true; lastBnoGood = sampleAt;
-    alignmentSampleInvalid = false;
-    // Reference diagnostics only: do not consume the encoder control generation
-    // here, or healthy BNO reports can starve the encoder-driven servo.
-    celestialRecoveryYawDiscrepancy = shortestDifference(sample.heading,
-        wrap360(heading.first + yawAxis.current));
-    celestialRecoveryPitchDiscrepancy = physicalPitch(sample) - pitchAxis.current;
-    heading.previous = wrap360(sample.heading);
-    heading.continuous = yawAxis.current + celestialRecoveryYawDiscrepancy;
-    if (!celestialBnoHealthy || !celestialBnoRecoveryReported) {
-        char line[320];
-        snprintf(line, sizeof(line),
-            "CELESTIAL_BNO id=%lu status=RECOVERED yaw_discrepancy_deg=%.5f pitch_discrepancy_deg=%.5f action=REPORT_ONLY feedback=AS5600\n",
-            static_cast<unsigned long>(celestialId), celestialRecoveryYawDiscrepancy,
-            celestialRecoveryPitchDiscrepancy);
-        queueText(line);
-    }
-    celestialBnoHealthy = true; celestialBnoRecoveryReported = true;
-}
-
 void rejectCelestial(uint32_t id, const char *reason) {
     char line[320];
     snprintf(line, sizeof(line), "CELESTIAL_REJECTED id=%lu reason=%s\n",
@@ -356,8 +96,6 @@ void celestialResult(const char *reason, bool latched) {
         celestialFailed || latched ? "FAILED" : "STOPPED", reason);
     queueText(line);
     celestialTracking = celestialFailed = false;
-    celestialEncoderMode = celestialEncoderPaused = false;
-    celestialBnoHealthy = true; celestialBnoRecoveryReported = false;
     celestialId = 0;
 }
 
@@ -408,7 +146,7 @@ void updateCelestialTiming(Axis &axis) {
     const double angle = axis.current - celestialTimingAngles[index];
     const double pulses = static_cast<double>(axis.motor->getCurrentPosition()) - celestialTimingSteps[index];
     if (fabs(angle) < DIRECTION_RESPONSE_DEG || fabs(pulses) < 8 ||
-        pulses * angle * bnoFeedbackStepSign(axis) <= 0) return;
+        pulses * angle * axisFeedbackStepSign(axis) <= 0) return;
     const double estimate = fabs(pulses / angle);
     if (celestialPulsesPerDegree[index] <= 0 || estimate > celestialPulsesPerDegree[index] * 1.1) {
         celestialPulsesPerDegree[index] = estimate;
@@ -437,15 +175,14 @@ void celestialSafety() {
     if (now - celestialUpdatedAt >= CELESTIAL_LEASE_MS) {
         stopCelestial("target update lease expired after 3000 ms"); return;
     }
-    if (!fresh(now) || now - lastBnoGood >= ALIGNMENT_PAUSE_AGE_MS || alignmentSampleInvalid)
-        celestialBnoUnavailable("BNO orientation stale or invalid");
-    if (bnoAccuracy < BNO_MIN_ACCURACY)
-        celestialBnoUnavailable("BNO accuracy below 2");
+    if (!fresh(now) || motionWatchdog.tripped()) {
+        stopCelestial("encoder feedback/reference lost; recalibrate before retrying"); return;
+    }
     const bool feedbackAvailable = celestialControlFeedbackReady();
     if (!celestialTracking && feedbackAvailable && now - controlStartedAt >= celestialDeadlineMs) {
         stopCelestial("celestial GOTO displacement/response deadline expired"); return;
     }
-    const double currentPitch = celestialEncoderMode ? pitchAxis.current : physicalPitch();
+    const double currentPitch = physicalPitch();
     if (fabs(currentPitch) >= MAX_USABLE_PITCH_DEG || fabs(pitchAxis.target) >= MAX_USABLE_PITCH_DEG) {
         stopCelestial("pitch reached +/-75 degree guard"); return;
     }
@@ -457,18 +194,6 @@ void enterCelestialTracking() {
     celestialTrackAxes[0].conversion = YAW_TRACK_PULSES_PER_DEG;
     celestialTrackAxes[1].conversion = PITCH_TRACK_PULSES_PER_DEG;
     celestialTracking = true;
-    // Freeze the acquired BNO reference and scale; all subsequent yaw/pitch
-    // position, residual, direction and response checks use AS5600 samples.
-    celestialEncoderMode = true;
-    celestialEncoderServicedGeneration = celestialEncoderGeneration - 1;
-    for (unsigned index = 0; index < 2; ++index) {
-        if (celestialEncoderAxes[index].scaleKnown)
-            celestialLearnedEncoderScale[index] = celestialEncoderAxes[index].degreesPerTick;
-    }
-    if (!celestialEncoderFeedbackAvailable(millis())) {
-        queueText("CELESTIAL_TRACK encoder reference/scale unavailable; HOLD until qualified AS5600 feedback; if uncalibrated, STOP and move both axes manually before retrying\n");
-        holdCelestialForEncoder(millis());
-    }
     // Acquisition settled at a finite target; continuous TRACK never completes.
     yawAxis.settled = pitchAxis.settled = false;
     yawAxis.slewFinished = pitchAxis.slewFinished = true;
@@ -481,34 +206,33 @@ void enterCelestialTracking() {
     celestialRateTelemetry();
 }
 void beginCelestial(uint32_t id, double yaw, double pitch) {
-    checkSensorReset();
     if (!commandIdle() || !controlReady || !poseMotorsStopped()) {
         rejectCelestial(id, "stopped READY required; busy or abort latched"); return;
     }
     const char *reason = northUnavailableReason(millis());
     if (strcmp(reason, "usable") != 0) { rejectCelestial(id, reason); return; }
     if (!fresh(millis()) || !isfinite(physicalPitch()) || !isfinite(yaw) || !isfinite(pitch)) {
-        rejectCelestial(id, "fresh finite BNO orientation and targets required"); return;
+        rejectCelestial(id, "fresh finite encoder orientation and targets required"); return;
     }
     if (fabs(pitch) >= MAX_USABLE_PITCH_DEG || fabs(physicalPitch()) >= MAX_USABLE_PITCH_DEG) {
         rejectCelestial(id, "current and target pitch must be inside +/-75 degrees"); return;
     }
     // Preserve the shortest heading move without a fixed yaw travel envelope.
     const double targetYaw = heading.continuous + shortestDifference(yaw, orientation.heading);
-    if (!bnoWatchdogReady || !motionWatchdog.clearTripWhenStopped()) {
+    if (!feedbackWatchdogReady || !motionWatchdog.clearTripWhenStopped()) {
         rejectCelestial(id, "orientation watchdog unavailable"); return;
     }
     operation = Operation::CELESTIAL;
-    poseActive = poseNeedsBno = true; poseStopping = alignmentPaused = false;
-    finalPrinted = false; phase = Phase::MOVING; window.active = false;
+    poseActive = poseNeedsFeedback = true; poseStopping = false;
+    finalPrinted = false; phase = Phase::MOVING;
     posePrecisionOnly = false; poseStoppedObserved = false;
     resetPoseAxis(yawAxis, targetYaw, 0); resetPoseAxis(pitchAxis, pitch, 0);
-    yawRequired = true; accuracyRequired = false; accuracyGrace = {};
+    yawRequired = true;
     carriageTarget = carriageMotor->getCurrentPosition(); carriagePending = false;
     yawRateCap = YAW_SLEW_SPEED_HZ; pitchRateCap = PITCH_SLEW_SPEED_HZ;
     plannedDurationSeconds = 0; timingLimited = false;
     settleSamples = 0; sawYawMotion = sawPitchMotion = concurrentMotion = concurrentThreeMotion = false;
-    controlStartedAt = celestialUpdatedAt = millis(); lastControlSample = bnoHealth.freshSamples;
+    controlStartedAt = celestialUpdatedAt = millis(); lastControlSample = feedbackGeneration;
     celestialId = id; celestialSequence = 0; celestialTracking = celestialFailed = false;
     celestialTrackAxes[0] = {}; celestialTrackAxes[1] = {};
     celestialTargetRate[0] = celestialTargetRate[1] = 0; celestialRateKnown = false;
@@ -517,12 +241,10 @@ void beginCelestial(uint32_t id, double yaw, double pitch) {
     celestialTimingAngles[0] = heading.continuous; celestialTimingAngles[1] = physicalPitch();
     celestialTimingSteps[0] = yawMotor->getCurrentPosition(); celestialTimingSteps[1] = pitchMotor->getCurrentPosition();
     celestialPulsesPerDegree[0] = yawPulsesPerDegree; celestialPulsesPerDegree[1] = pitchPulsesPerDegree;
-    initializeCelestialEncoders();
     recordTimingStarts();
-    // Once admitted, BNO health is optional for this celestial session.  Its
-    // independent stale watchdog must therefore never turn an outage into a
-    // forced stop; encoder freshness is handled by a preserving HOLD instead.
-    motionWatchdog.disarm();
+    if (!motionWatchdog.arm(lastFeedbackAt)) {
+        stopCelestial("encoder feedback watchdog arm failed"); return;
+    }
     char line[220];
     snprintf(line, sizeof(line), "CELESTIAL_ACCEPTED id=%lu deadline_ms=%lu yaw_target=%.5f pitch_target=%.5f lease_ms=%lu\n",
         static_cast<unsigned long>(id), static_cast<unsigned long>(celestialDeadlineMs), wrap360(yaw), pitch,
@@ -650,19 +372,21 @@ void serviceCelestialTrackAxis(Axis &axis, uint32_t now, uint32_t sampleAt) {
     track.correction += fmax(-ramp, fmin(ramp, desiredCorrection - track.correction));
     const double rate = fmax(-CELESTIAL_MAX_TARGET_RATE_DPS,
         fmin(CELESTIAL_MAX_TARGET_RATE_DPS, celestialTargetRate[index] + track.correction));
-    const int direction = bnoSlewStepDirection(rate, axis.pitch);
+    const int direction = axisSlewStepDirection(rate, axis.pitch);
     const double requested = fmin(limitedSpeed(axis, slewSpeed(axis.pitch)) * 1000.0,
         fabs(rate) * track.conversion * 1000.0);
     // FAS's 32-bit tick interval cannot represent arbitrarily low rates. Treat
     // an unrepresentable rate as zero; never clamp UP and overdrive an axis.
-    const uint32_t milliHz = requested >= CELESTIAL_MIN_RATE_MILLIHZ ?
+    // Target differencing/filtering can round an exact 5 mHz down by a few
+    // floating-point ulps. Do not toggle zero/run at that representation edge.
+    const uint32_t milliHz = requested + 1e-9 >= CELESTIAL_MIN_RATE_MILLIHZ ?
         static_cast<uint32_t>(lround(requested)) : 0;
     // A moving target need not have shrinking residual error. Detect absent
     // measured motion instead, after enough commanded travel to distinguish it
     // from sensor resolution and legitimate sub-hertz step pauses. Keep the
     // residual filter/correction and telemetry independent of this stall check.
     if (!milliHz || axis.motion != Motion::TRACK || !track.started ||
-            (axis.current - track.progressPosition) * bnoFeedbackStepSign(axis) * axis.slewDirection >= 0.1) {
+            (axis.current - track.progressPosition) * axisFeedbackStepSign(axis) * axis.slewDirection >= 0.1) {
         track.progressAt = now; track.progressPosition = axis.current; track.commandedTravel = 0;
     } else {
         track.commandedTravel += (track.rateMilliHz / 1000.0 / track.conversion) * seconds;
@@ -733,15 +457,15 @@ void celestialRateTelemetry() {
         const auto &track = celestialTrackAxes[n];
         const Axis &axis = *axes[n];
         // Signed STEP Hz; correction_dps uses the feedback angle convention.
-        const double nominal = celestialTargetRate[n] * track.conversion * bnoFeedbackStepSign(axis);
-        const double correction = track.correction * track.conversion * bnoFeedbackStepSign(axis);
-        const double commanded = axis.motion == Motion::TRACK && !poseStopping && !celestialEncoderPaused ?
+        const double nominal = celestialTargetRate[n] * track.conversion * axisFeedbackStepSign(axis);
+        const double correction = track.correction * track.conversion * axisFeedbackStepSign(axis);
+        const double commanded = axis.motion == Motion::TRACK && !poseStopping ?
             static_cast<double>(axis.slewDirection) * track.rateMilliHz / 1000.0 : 0;
         char line[420];
         snprintf(line, sizeof(line),
             "CELESTIAL_RATE id=%lu axis=%s source=CONFIGURED pulses_per_degree=%.3f rate_known=%s feedback=%s target_dps=%.6f nominal_hz=%.6f correction_dps=%.6f correction_hz=%.6f commanded_hz=%.6f error_deg=%.5f\n",
             static_cast<unsigned long>(celestialId), n ? "PITCH" : "YAW", track.conversion,
-            celestialRateKnown ? "YES" : "NO", celestialEncoderMode ? "AS5600" : "BNO",
+            celestialRateKnown ? "YES" : "NO", "AS5600",
             celestialTargetRate[n], nominal, track.correction, correction, commanded, axis.error);
         queueText(line);
     }
@@ -754,15 +478,16 @@ void celestialTelemetry() {
     }
     char line[620];
     snprintf(line, sizeof(line),
-        "CELESTIAL_STATE id=%lu mode=%s yaw_target=%.5f pitch_target=%.5f yaw_error=%.5f pitch_error=%.5f lease_age_ms=%lu feedback=%s bno=%s encoder=%s bno_yaw_discrepancy_deg=%.5f bno_pitch_discrepancy_deg=%.5f yaw_target_dps=%.6f pitch_target_dps=%.6f yaw_rate_ready=%s pitch_rate_ready=%s\n",
+        "CELESTIAL_STATE id=%lu mode=%s yaw_target=%.5f pitch_target=%.5f yaw_error=%.5f pitch_error=%.5f lease_age_ms=%lu feedback=%s encoder=%s yaw_target_dps=%.6f pitch_target_dps=%.6f yaw_rate_ready=%s pitch_rate_ready=%s yaw_positive_step=%d pitch_positive_step=%d yaw_motor_mHz=%ld pitch_motor_mHz=%ld\n",
         static_cast<unsigned long>(celestialId), poseStopping ? "STOPPING" : (celestialTracking ? "TRACK" : "GOTO"),
         wrap360(heading.first + yawAxis.target), pitchAxis.target, yawAxis.error, pitchAxis.error,
-        static_cast<unsigned long>(millis() - celestialUpdatedAt), celestialEncoderMode ? "AS5600" : "BNO",
-        celestialBnoHealthy ? "AVAILABLE" : "DEGRADED",
-        celestialEncoderFeedbackAvailable(millis()) ? "AVAILABLE" : "UNAVAILABLE",
-        celestialRecoveryYawDiscrepancy, celestialRecoveryPitchDiscrepancy,
+        static_cast<unsigned long>(millis() - celestialUpdatedAt), "AS5600",
+        fresh(millis()) ? "AVAILABLE" : "UNAVAILABLE",
         celestialTargetRate[0], celestialTargetRate[1],
         celestialTrackAxes[0].conversion > 0 ? "YES" : "NO",
-        celestialTrackAxes[1].conversion > 0 ? "YES" : "NO");
+        celestialTrackAxes[1].conversion > 0 ? "YES" : "NO",
+        axisFeedbackStepSign(yawAxis), axisFeedbackStepSign(pitchAxis),
+        static_cast<long>(yawMotor->getCurrentSpeedInMilliHz()),
+        static_cast<long>(pitchMotor->getCurrentSpeedInMilliHz()));
     queueText(line);
 }

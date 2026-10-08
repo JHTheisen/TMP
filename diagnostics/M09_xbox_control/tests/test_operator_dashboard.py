@@ -18,9 +18,9 @@ from operator_dashboard import OperatorDashboard
 from xbox_control import ManualSession
 
 
-BNO_REPORT = ("BNO_STATE available=YES has_sample=YES fresh=YES age_ms=10 "
-              "accuracy=3 north_usable=YES heading=301.800 physical_pitch=-9.989 "
-              "pitch_axis=PITCH pitch_roll=3.571")
+ENCODER_REPORT = ("ORIENTATION_STATE protocol=2 feedback=AS5600 level_set=YES north_set=YES available=YES has_sample=YES fresh=YES age_ms=10 "
+              "heading=301.800 physical_pitch=-9.989 "
+              "pitch_axis=PITCH roll=UNAVAILABLE")
 
 
 class RecordingFont:
@@ -70,36 +70,34 @@ class OperatorDashboardTests(unittest.TestCase):
         self.assertEqual(timings[0][0], "pygame.display.flip")
         self.assertAlmostEqual(timings[0][1], .2)
 
-    def test_live_orientation_uses_existing_sensor_angles_even_while_display_frozen(self):
+    def test_live_encoder_angles_are_not_replaced_by_targets_or_frozen_diagnostics(self):
         screen, dashboard, session, auto = self.make_dashboard()
         output = []
-        dashboard.small = RecordingFont(dashboard.small, output)
-        session.receive(BNO_REPORT, 1.9)
-        # Celestial targets/encoder feedback and rejected raw samples must not
-        # replace the sensor orientation used for manual setup.
+        dashboard.title = RecordingFont(dashboard.title, output)
+        dashboard.font = RecordingFont(dashboard.font, output)
+        session.receive(ENCODER_REPORT, 1.9)
         session.receive("CELESTIAL_STATE yaw_target=100 yaw_error=2 pitch_target=50 pitch_error=1", 1.9)
-        session.receive("BNO_RAW yaw_deg=999 pitch_deg=999 roll_deg=999 accepted=NO", 1.9)
         auto.action, auto.phase = "celestial", "CELESTIAL_TRACK"
         before = copy.deepcopy((vars(session), vars(auto)))
         self.draw(screen, dashboard, session, auto, display_frozen=True)
-        self.assertIn("Pitch -9.99°", output)
-        self.assertIn("Roll 3.57°", output)
-        self.assertIn("Heading/yaw 301.80°", output)
+        self.assertIn("-9.989°", output)
+        self.assertIn("301.800°", output)
+        self.assertIn("UNAVAILABLE", output)  # roll
         self.assertEqual((vars(session), vars(auto)), before)
         output.clear()
-        session.receive(BNO_REPORT.replace("-9.989", "12.500").replace("3.571", "-4.250"), 2.1)
+        session.receive(ENCODER_REPORT.replace("-9.989", "12.500"), 2.1)
         self.draw(screen, dashboard, session, auto, now=2.2, display_frozen=True)
-        self.assertIn("Pitch 12.50°", output)
-        self.assertIn("Roll -4.25°", output)
+        self.assertIn("12.500°", output)
+
 
     def test_optional_orientation_failures_never_change_manual_commands_or_buttons(self):
-        fields = dict(token.split("=", 1) for token in BNO_REPORT.split()[1:])
+        fields = dict(token.split("=", 1) for token in ENCODER_REPORT.split()[1:])
         cases = [(None, "UNAVAILABLE"), ({}, "UNAVAILABLE")]
         for key, value in (("available", "NO"), ("has_sample", "NO"), ("valid", "NO"),
                            ("pitch_axis", "ROLL"), ("fresh", "?"),
                            ("age_ms", "nan"), ("age_ms", "inf"), ("age_ms", "-1")):
             cases.append(({**fields, key: value}, "UNAVAILABLE"))
-        for key in ("physical_pitch", "pitch_roll", "heading"):
+        for key in ("physical_pitch", "heading"):
             for value in ("nan", "inf", "-inf", "bad", "", "1e999", "999999999"):
                 cases.append(({**fields, key: value}, "UNAVAILABLE"))
             cases.append(({name: value for name, value in fields.items() if name != key}, "UNAVAILABLE"))
@@ -112,7 +110,7 @@ class OperatorDashboardTests(unittest.TestCase):
                 session.arm(1.1, True)
                 session.receive("MANUAL READY: test", 1.2)
                 if report is not None:
-                    session.receive("BNO_STATE " + " ".join(f"{key}={value}" for key, value in report.items()), 1.9)
+                    session.receive("ORIENTATION_STATE protocol=2 feedback=AS5600 level_set=YES north_set=YES " + " ".join(f"{key}={value}" for key, value in report.items()), 1.9)
                 before = copy.deepcopy((vars(session), vars(auto)))
                 output = []
                 dashboard.font = RecordingFont(dashboard.font, output)
@@ -127,27 +125,27 @@ class OperatorDashboardTests(unittest.TestCase):
 
     def test_orientation_expires_without_reports_and_recovers(self):
         session = ManualSession()
-        session.receive(BNO_REPORT, 1)
-        self.assertEqual(OperatorDashboard._bno_orientation(session.sensor_fields, session.sensor_status_at, 1.1)[0], "LIVE")
-        # Unrelated telemetry cannot refresh BNO orientation.
+        session.receive(ENCODER_REPORT, 1)
+        self.assertEqual(OperatorDashboard._encoder_orientation(session.sensor_fields, session.sensor_status_at, 1.1)[0], "LIVE")
+        # Unrelated telemetry cannot refresh ENCODER orientation.
         session.receive("STATE MANUAL heading=999", 3)
-        self.assertEqual(OperatorDashboard._bno_orientation(session.sensor_fields, session.sensor_status_at, 3.1), ("STALE", None))
-        session.receive(BNO_REPORT.replace("age_ms=10", "age_ms=1900"), 3.1)
-        self.assertEqual(OperatorDashboard._bno_orientation(session.sensor_fields, session.sensor_status_at, 3.3), ("STALE", None))
-        session.receive(BNO_REPORT.replace("accuracy=3", "accuracy=0").replace("north_usable=YES", "north_usable=NO"), 3.4)
-        self.assertEqual(OperatorDashboard._bno_orientation(session.sensor_fields, session.sensor_status_at, 3.5),
-                         ("LIVE", (-9.989, 3.571, 301.8)))
+        self.assertEqual(OperatorDashboard._encoder_orientation(session.sensor_fields, session.sensor_status_at, 3.1), ("STALE", None))
+        session.receive(ENCODER_REPORT.replace("age_ms=10", "age_ms=1900"), 3.1)
+        self.assertEqual(OperatorDashboard._encoder_orientation(session.sensor_fields, session.sensor_status_at, 3.3), ("STALE", None))
+        session.receive(ENCODER_REPORT.replace("accuracy=3", "accuracy=0").replace("north_usable=YES", "north_usable=NO"), 3.4)
+        self.assertEqual(OperatorDashboard._encoder_orientation(session.sensor_fields, session.sensor_status_at, 3.5),
+                         ("LIVE", (-9.989, 301.8)))
 
     def test_orientation_text_fits_existing_card_at_minimum_window_size(self):
         screen = pygame.display.set_mode((820, 620))
         dashboard = OperatorDashboard(pygame)
         session, auto = ManualSession(), AutoSession()
-        for report in (BNO_REPORT.replace("accuracy=3", "accuracy=0"),
-                       BNO_REPORT.replace("heading=301.800", "heading=nan")):
+        for report in (ENCODER_REPORT.replace("accuracy=3", "accuracy=0"),
+                       ENCODER_REPORT.replace("heading=301.800", "heading=nan")):
             session.receive(report, 1.9)
             with mock.patch.object(dashboard, "_text", wraps=dashboard._text) as draw_text:
                 self.draw(screen, dashboard, session, auto)
-            # Existing BNO card at minimum size: x=416..604, y=126..214.
+            # Existing ENCODER card at minimum size: x=416..604, y=126..214.
             boxes = []
             for call in draw_text.call_args_list:
                 _, font, value, pos, *_ = call.args
@@ -217,39 +215,41 @@ class OperatorDashboardTests(unittest.TestCase):
                     self.assertLessEqual(rect.right, size[0])
                     self.assertLessEqual(rect.bottom, size[1])
 
-    def test_active_encoder_propagated_tracking_is_visibly_degraded(self):
+    def test_active_tracking_identifies_encoder_feedback(self):
         screen, dashboard, session, auto = self.make_dashboard()
         output = []
         dashboard.font = RecordingFont(dashboard.font, output)
         dashboard.small = RecordingFont(dashboard.small, output)
         dashboard.title = RecordingFont(dashboard.title, output)
         dashboard.mono = RecordingFont(dashboard.mono, output)
-        session.receive("BNO_STATE available=NO fresh=NO accuracy=0 heading=101 physical_pitch=22", 1.9)
+        session.receive("ORIENTATION_STATE protocol=2 feedback=AS5600 level_set=YES north_set=YES available=NO fresh=NO heading=101 physical_pitch=22", 1.9)
         session.receive("ENCODER_STATE bus=A available=YES valid=YES angle_deg=101", 1.9)
         session.receive("ENCODER_STATE bus=B available=YES valid=YES angle_deg=22", 1.9)
-        session.receive("CELESTIAL_STATE id=7 mode=TRACK feedback=AS5600 bno=DEGRADED encoder=AVAILABLE", 1.9)
+        session.receive("CELESTIAL_STATE id=7 mode=TRACK feedback=AS5600 encoder=AVAILABLE", 1.9)
         auto.action, auto.phase = "celestial", "CELESTIAL_TRACK"
         auto.celestial_status = "RA=18.615639 h Dec=+38.783611 deg"
         self.draw(screen, dashboard, session, auto)
         self.assertIn("CELESTIAL TRACKING ACTIVE", output)
-        self.assertIn("ENCODER PROPAGATED / BNO DEGRADED", output)
+        self.assertIn("AS5600 ENCODER FEEDBACK", output)
         self.assertIn("ENC Y:OK  P:OK", output)
 
-    def test_roll_is_as_prominent_as_yaw_and_pitch(self):
+    def test_roll_is_explicitly_unavailable(self):
         screen, dashboard, session, auto = self.make_dashboard()
         output = []
-        dashboard.title = RecordingFont(dashboard.title, output)
         dashboard.small = RecordingFont(dashboard.small, output)
-        session.receive("BNO_STATE pitch_roll=-12.345", 1.9)
+        dashboard.font = RecordingFont(dashboard.font, output)
+        session.receive(ENCODER_REPORT, 1.9)
         self.draw(screen, dashboard, session, auto)
         self.assertIn("ROLL", output)
-        self.assertIn("-12.345\N{DEGREE SIGN}", output)
+        self.assertIn("UNAVAILABLE", output)
 
-    def test_low_accuracy_bno_and_bad_encoder_magnet_are_degraded(self):
-        self.assertEqual(OperatorDashboard._health(
-            {"available": "YES", "fresh": "YES", "accuracy": "1"}, 1.9, 2.0, True)[0], "DEGRADED")
+
+    def test_bad_encoder_magnet_and_stale_sample_are_degraded(self):
         self.assertEqual(OperatorDashboard._health(
             {"available": "YES", "valid": "YES", "magnet_good": "NO"}, 1.9, 2.0)[0], "DEGRADED")
+        self.assertEqual(OperatorDashboard._health(
+            {"available": "YES", "valid": "YES", "age_ms": "2100"}, 1.9, 2.0)[0], "STALE")
+
 
 
 if __name__ == "__main__":

@@ -42,8 +42,7 @@ GOTO-to-TRACK transition. Each normal worker update recalculates the selected
 object at current UTC and supplies the existing `CELESTIAL_UPDATE` stream.
 Firmware continues deriving continuous tracking rates from that stream.
 
-No new motor command, rate controller, BNO prerequisite, timeout, or automatic
-STOP policy is added. The separate preview worker only produces display data:
+Both calibrated AS5600 references and protocol 2 are required for pointing. The separate preview worker only produces display data:
 preview errors, opening the picker and selecting another tile do not cancel or
 retarget active tracking. Existing active-session failure handling is unchanged.
 Target name, azimuth, altitude and UTC remain in the existing celestial status/log.
@@ -55,4 +54,4 @@ current launcher reads project-local packages from `.pio/python_deps`:
 & "$env:USERPROFILE\.platformio\penv\Scripts\python.exe" -m pip install --target .pio/python_deps -r requirements.txt
 ```
 
-This feature requires no firmware changes or upload.
+Use this host with the matching dual-encoder protocol 2 firmware. See CELESTIAL.md for calibration before pointing.

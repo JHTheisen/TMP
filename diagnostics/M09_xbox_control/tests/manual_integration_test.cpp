@@ -42,10 +42,7 @@ void aborted() {
 int main(int argc, char **argv) {
     if (argc != 2) return 1;
     const std::string scenario = argv[1];
-    simulated::physicalPitchUsesRoll = false;
     simulated::independentTick = tick;
-    if (scenario == "missing_bno") simulated::bnoAckFails = true;
-    if (scenario == "low_accuracy") simulated::accuracy = 0;
     if (scenario == "axis_init") simulated::axisInitFails = true;
     if (scenario == "speed_init") simulated::speedFails = true;
     setup();
@@ -115,22 +112,16 @@ int main(int argc, char **argv) {
             CHECK(manualActive && manualMotorsStopped() && !commandWatchdog.armed());
             const size_t centeredCommands = simulated::commands.size();
             advance(1000); CHECK(simulated::commands.size() == centeredCommands); stop();
-        } else if (scenario == "missing_bno" || scenario == "low_accuracy" || scenario == "stale" ||
-                   scenario == "invalid" || scenario == "wrong_report" || scenario == "reset" ||
-                   scenario == "no_orientation_limits" || scenario == "frozen_feedback" || scenario == "stop_without_bno") {
-            if (scenario == "stale" || scenario == "stop_without_bno") {
-                simulated::bnoPauseStart = millis(); simulated::bnoPauseEnd = millis() + 10000;
-            }
-            if (scenario == "invalid") simulated::invalidQuaternion = true;
-            if (scenario == "wrong_report") simulated::wrongReportType = true;
-            if (scenario == "reset") simulated::resetDuringPoll = true;
+        } else if (scenario == "missing_encoders" || scenario == "bad_magnet" ||
+                   scenario == "no_orientation_limits" || scenario == "frozen_feedback" || scenario == "stop_without_encoders") {
+            Wire.encoder.present = Wire1.encoder.present = scenario != "missing_encoders";
+            if (scenario == "bad_magnet") Wire.encoder.status = 0x30;
             if (scenario == "no_orientation_limits") {
                 simulated::yawDisturbance = 250; simulated::pitchDisturbance = 100;
-                simulated::motors[0].physicalSign *= -1; // No BNO direction/runaway gate for JOG.
+                simulated::motors[0].physicalSign *= -1; // Manual travel is operator supervised.
             }
-            if (scenario == "frozen_feedback") simulated::frozenFeedback = true;
-            for (unsigned accuracy = 0; accuracy <= 3; ++accuracy) {
-                simulated::accuracy = accuracy; stream(100, 100, 300);
+            for (unsigned n = 0; n < 4; ++n) {
+                stream(100, 100, 300);
                 CHECK(manualActive && yawMotor->isRunning() && pitchMotor->isRunning());
                 CHECK(!motionWatchdog.armed() && !motionWatchdog.tripped());
             }

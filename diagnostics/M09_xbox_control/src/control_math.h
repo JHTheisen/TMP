@@ -3,7 +3,8 @@
 #include <stdint.h>
 
 namespace milestone7 {
-// Physically verified mappings; yaw retains small per-run response probes.
+// Retained manual joystick mappings. Encoder-position control composes its
+// separate raw-count/motor sign with the configured scale in main.cpp.
 constexpr int POSITIVE_STEP_PITCH_SIGN = -1;
 #ifndef M07_TRIAL_POSITIVE_STEP_YAW_SIGN
 #define M07_TRIAL_POSITIVE_STEP_YAW_SIGN -1
@@ -27,9 +28,6 @@ constexpr double BRAKING_DISTANCE_FACTOR = 1.5, BRAKING_LATENCY_S = 0.25;
 constexpr uint32_t VELOCITY_WINDOW_MS = 100, PRECISION_OBSERVE_MS = 100;
 constexpr uint32_t SLEW_PROGRESS_TIMEOUT_MS = 2000, BURST_TIMEOUT_MS = 4000;
 constexpr uint32_t BRAKING_TIMEOUT_MS = 3000;
-constexpr uint8_t BNO_MIN_ACCURACY = 2;
-constexpr uint32_t BNO_ACCURACY_GRACE_MS = 1000;
-
 inline uint32_t slewSpeed(bool pitch) { return pitch ? PITCH_SLEW_SPEED_HZ : YAW_SLEW_SPEED_HZ; }
 inline int32_t slewAcceleration(bool pitch) { return pitch ? PITCH_SLEW_ACCELERATION : YAW_SLEW_ACCELERATION; }
 inline double approachThreshold(bool pitch) { return pitch ? PITCH_APPROACH_DEG : YAW_APPROACH_DEG; }
@@ -37,27 +35,13 @@ inline int stepDirection(double error, bool pitch) {
     return (error > 0 ? 1 : -1) * (pitch ? POSITIVE_STEP_PITCH_SIGN : TRIAL_POSITIVE_STEP_YAW_SIGN);
 }
 inline double brakingThreshold(bool pitch, double peakAngularSpeed) {
-    // BNO-derived deg/s; no assumed shaft-to-cradle ratio. Use full configured
+    // Encoder-derived deg/s; no assumed shaft-to-cradle ratio. Use full configured
     // speed for stopping time, including while still accelerating. The extra
     // latency margin covers measurement/filter age and the FAS command queue.
     const double stoppingTime = static_cast<double>(slewSpeed(pitch)) / slewAcceleration(pitch);
     return approachThreshold(pitch) + fabs(peakAngularSpeed) *
         (0.5 * BRAKING_DISTANCE_FACTOR * stoppingTime + BRAKING_LATENCY_S);
 }
-struct AccuracyGrace {
-    bool low = false;
-    uint32_t since = 0, episodes = 0, recoveries = 0, longestMs = 0;
-    uint32_t age(uint32_t now) const { return low ? now - since : 0; }
-    void observe(uint8_t accuracy, uint32_t now) {
-        if (accuracy < BNO_MIN_ACCURACY) {
-            if (!low) { low = true; since = now; ++episodes; }
-        } else if (low) {
-            longestMs = age(now) > longestMs ? age(now) : longestMs;
-            low = false; ++recoveries;
-        }
-    }
-    bool expired(uint32_t now) const { return low && age(now) >= BNO_ACCURACY_GRACE_MS; }
-};
 static_assert(POSITIVE_STEP_PITCH_SIGN == 1 || POSITIVE_STEP_PITCH_SIGN == -1, "Pitch sign must be +1 or -1");
 static_assert(TRIAL_POSITIVE_STEP_YAW_SIGN == 1 || TRIAL_POSITIVE_STEP_YAW_SIGN == -1, "Yaw sign must be +1 or -1");
 

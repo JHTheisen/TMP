@@ -31,17 +31,5 @@ int main() {
         CHECK(brakingThreshold(pitch, 10) == brakingThreshold(pitch, -10));
         CHECK(stepDirection(10, pitch) == -stepDirection(-10, pitch));
     }
-    AccuracyGrace accuracy;
-    accuracy.observe(3, 100); CHECK(!accuracy.low);
-    accuracy.observe(1, 200); CHECK(accuracy.low && accuracy.episodes == 1);
-    accuracy.observe(0, 300); CHECK(accuracy.since == 200 && accuracy.episodes == 1);
-    CHECK(!accuracy.expired(200 + BNO_ACCURACY_GRACE_MS - 1));
-    CHECK(accuracy.expired(200 + BNO_ACCURACY_GRACE_MS));
-    accuracy.observe(2, 600); CHECK(!accuracy.low && accuracy.recoveries == 1 && accuracy.longestMs == 400);
-    accuracy.observe(1, 700); CHECK(!accuracy.expired(700 + BNO_ACCURACY_GRACE_MS - 1));
-    CHECK(accuracy.episodes == 2 && accuracy.since == 700);
-    AccuracyGrace wrapAccuracy;
-    wrapAccuracy.observe(1, UINT32_MAX - 499);
-    CHECK(!wrapAccuracy.expired(499)); CHECK(wrapAccuracy.expired(500));
     std::printf("PASS: north wrap, independent axis commands and heading continuity (%u checks)\n", checks);
 }

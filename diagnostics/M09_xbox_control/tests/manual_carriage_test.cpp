@@ -19,7 +19,6 @@ void stream(int carriage, uint32_t duration, int yaw=0, int pitch=0) {
 int main(int argc,char **argv) {
     if(argc!=2) return 1;
     const std::string scenario=argv[1];
-    simulated::physicalPitchUsesRoll=false;
     simulated::independentTick=tick;
     if(scenario=="sensor_independent") simulated::busBInitFails=true;
     setup(); advance(50); CHECK(commandIdle());

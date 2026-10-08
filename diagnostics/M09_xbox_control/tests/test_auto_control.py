@@ -17,7 +17,7 @@ class AutoControlTests(unittest.TestCase):
     def snapshot(self, request_id, steps=(10, -20, 30), epoch=42):
         return (f"KEYFRAME_SNAPSHOT id={request_id} epoch={epoch} yaw_steps={steps[0]} "
                 f"pitch_steps={steps[1]} carriage_steps={steps[2]} heading=292.2 physical_pitch=-40.2 "
-                "bno_valid=YES bno_age_ms=12 accuracy=1 north_usable=NO unhomed=YES")
+                "orientation_valid=YES orientation_age_ms=12 unhomed=YES")
 
     def request(self, action, now, centered):
         command = self.auto.request(action, now, centered)
@@ -261,12 +261,12 @@ class AutoControlTests(unittest.TestCase):
         self.assertIsNone(self.auto.frame(10))
         self.assertIsNone(self.request("pitch_up", 11, True))
 
-    def test_bno_metadata_changes_never_clear_captures(self):
+    def test_encoder_metadata_changes_never_clear_captures(self):
         self.capture("A")
         self.capture("B")
-        for status in ("BNO_STATE fresh=NO accuracy=0 north_usable=NO has_sample=YES",
-                       "BNO WARNING: sensor reset; orientation unavailable",
-                       "BNO_STATE available=NO has_sample=NO"):
+        for status in ("ORIENTATION_STATE protocol=2 feedback=AS5600 level_set=YES north_set=YES fresh=NO has_sample=YES",
+                       "ENCODER WARNING: sensor reset; orientation unavailable",
+                       "ORIENTATION_STATE protocol=2 feedback=AS5600 level_set=YES north_set=YES available=NO has_sample=NO"):
             self.auto.receive(status, 1)
         self.assertEqual(len(self.auto.frames), 2)
 
@@ -323,7 +323,7 @@ class AutoControlTests(unittest.TestCase):
                 self.assertTrue(self.auto.overridable)
                 self.auto.receive(name+" DEADLINE deadline_ms=200000",2)
                 self.assertAlmostEqual(self.auto.deadline,206.1) # Relative to admission, not update receipt.
-                self.auto.receive(name+" PAUSED: BNO stale; recovery grace_ms=1500",100)
+                self.auto.receive(name+" PAUSED: ENCODER stale; recovery grace_ms=1500",100)
                 self.assertIsNone(self.auto.frame(100.1))
                 self.auto.receive(name+" RESUMED deadline_ms=201100",101.1)
                 self.assertAlmostEqual(self.auto.deadline,207.2)
@@ -334,7 +334,7 @@ class AutoControlTests(unittest.TestCase):
                 self.assertEqual(self.request("capture_b",103,False),b"SNAP 3\n")
 
     def test_alignment_rejection_and_failure_are_recoverable(self):
-        for terminal in ("REJECTED: BNO unavailable", "RESULT: STOPPED"):
+        for terminal in ("REJECTED: ENCODER unavailable", "RESULT: STOPPED"):
             for name in ("LEVEL","NORTH"):
                 self.setUp()
                 self.capture("A")

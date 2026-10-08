@@ -42,18 +42,18 @@ class CelestialUiTests(unittest.TestCase):
                     "M09 READY\n"
                     "OPERATION FAILED: target update lease expired after 3000 ms\n").encode()
 
-    def test_bno_display_failures_leave_celestial_serial_stream_unchanged(self):
+    def test_encoder_display_failures_leave_celestial_serial_stream_unchanged(self):
         baseline = self.run_ui([(1.4, submit())], until=4.6, real_session=True)
         def invalid(port):
-            port.rx += (b"BNO_STATE available=YES has_sample=YES fresh=YES age_ms=10 "
-                        b"accuracy=3 heading=nan physical_pitch=oops pitch_axis=PITCH pitch_roll=inf\n")
+            port.rx += (b"ORIENTATION_STATE protocol=2 feedback=AS5600 level_set=YES north_set=YES available=YES has_sample=YES fresh=YES age_ms=10 "
+                        b"heading=nan physical_pitch=oops pitch_axis=PITCH roll=UNAVAILABLE\n")
         def disconnected(port):
-            port.rx += b"BNO_STATE available=NO has_sample=NO fresh=NO age_ms=4294967295\n"
+            port.rx += b"ORIENTATION_STATE protocol=2 feedback=AS5600 level_set=YES north_set=YES available=NO has_sample=NO fresh=NO age_ms=4294967295\n"
         def stale(port):
-            port.rx += (b"BNO_STATE available=YES has_sample=YES fresh=NO age_ms=4000 "
-                        b"accuracy=0 heading=123 physical_pitch=12 pitch_axis=PITCH pitch_roll=-5\n")
+            port.rx += (b"ORIENTATION_STATE protocol=2 feedback=AS5600 level_set=YES north_set=YES available=YES has_sample=YES fresh=NO age_ms=4000 "
+                        b"heading=123 physical_pitch=12 pitch_axis=PITCH roll=UNAVAILABLE\n")
         result, writes, _, _, auto, rows, _ = self.run_ui(
-            [(1.0, invalid), (1.4, submit()), (2.0, disconnected), (2.6, stale)],
+            [(1.8, invalid), (1.4, submit()), (2.0, disconnected), (2.6, stale)],
             until=4.6, real_session=True)
         self.assertEqual(result, 0)
         self.assertEqual(writes, baseline[1])
@@ -63,7 +63,7 @@ class CelestialUiTests(unittest.TestCase):
         self.assertIn("STALE", rows)
 
     def run_ui(self, actions=(), *, until=3.0, dry_run=False, config=None,
-               real_session=False, worker_error=None, gui_entry=False):
+               real_session=False, worker_error=None, gui_entry=False, orientation=True):
         class Clock:
             now = 0.0
             def monotonic(self):
@@ -168,6 +168,8 @@ class CelestialUiTests(unittest.TestCase):
                     self.mode = "READY"
                     self.rx += b"M09 READY\n"
                 elif verb == b"STATUS":
+                    if orientation:
+                        self.rx += b"ORIENTATION_STATE protocol=2 feedback=AS5600 available=YES has_sample=YES fresh=YES north_set=YES level_set=YES age_ms=10 heading=100 physical_pitch=30 pitch_axis=PITCH\n"
                     self.rx += f"M09 {self.mode}\n".encode()
                 elif verb == b"X":
                     self.track_at = self.celestial_id = None
@@ -313,8 +315,8 @@ class CelestialUiTests(unittest.TestCase):
 
     def test_track_here_button_captures_current_pointing_and_tracks(self):
         def orientation(port):
-            port.rx += (b"BNO_STATE available=YES has_sample=YES fresh=YES age_ms=10 accuracy=3 "
-                        b"north_usable=YES heading=100 physical_pitch=30 pitch_axis=PITCH pitch_roll=2\n")
+            port.rx += (b"ORIENTATION_STATE protocol=2 feedback=AS5600 level_set=YES north_set=YES available=YES has_sample=YES fresh=YES age_ms=10 "
+                        b"heading=100 physical_pitch=30 pitch_axis=PITCH roll=UNAVAILABLE\n")
         result, writes, _, session, auto, rows, log = self.run_ui(
             [(.9, orientation), (1.4, [pygame.event.Event(
                 pygame.MOUSEBUTTONDOWN, button=1, pos=(850, 327))])],
@@ -331,7 +333,7 @@ class CelestialUiTests(unittest.TestCase):
         click_here = pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=(850, 327))
         result, writes, _, session, auto, rows, log = self.run_ui(
             [(1.4, [click_here]), (1.8, lambda port: port.axes.__setitem__(1, -.8))],
-            until=2.3, real_session=True, gui_entry=True)
+            until=2.3, real_session=True, gui_entry=True, orientation=False)
         self.assertEqual(result, 0)
         self.assertEqual(auto.phase, "READY")
         self.assertTrue(any(at >= 1.8 and data == b"JOG 0 585 0\n" for at, data in writes))

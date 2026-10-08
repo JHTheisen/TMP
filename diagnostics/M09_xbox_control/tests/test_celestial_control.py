@@ -36,7 +36,8 @@ class FakeWorker:
 class CelestialControlTests(unittest.TestCase):
     def setUp(self):
         self.auto = AutoSession()
-        self.reference = HeadingReference(magnetic_declination_deg=5)
+        self.auto.receive("ORIENTATION_STATE protocol=2 feedback=AS5600 available=YES fresh=YES north_set=YES level_set=YES age_ms=10 heading=0 physical_pitch=0", 0)
+        self.reference = HeadingReference(magnetic_declination_deg=5, north_reference="magnetic")
         self.auto.configure_celestial(Observer(42, -83, 200), self.reference)
         self.worker = FakeWorker()
         self.auto.celestial.worker = self.worker
@@ -86,7 +87,7 @@ class CelestialControlTests(unittest.TestCase):
         self.assertIsNone(self.auto.action)
 
     def test_track_here_captures_mount_pointing_then_uses_existing_tracker(self):
-        fields = {"available": "YES", "has_sample": "YES", "fresh": "YES", "north_usable": "YES",
+        fields = {"available": "YES", "has_sample": "YES", "fresh": "YES", "protocol": "2", "feedback": "AS5600", "level_set": "YES", "north_set": "YES",
                   "pitch_axis": "PITCH", "age_ms": "10", "heading": "100", "physical_pitch": "30"}
         self.assertEqual(self.auto.request_track_here(1, True, fields, .95), b"STOP\n")
         self.assertEqual(len(self.worker.captures), 1)
@@ -105,11 +106,12 @@ class CelestialControlTests(unittest.TestCase):
 
     def test_here_and_radec_have_identical_steady_state_updates(self):
         streams = []
-        fields = {"available": "YES", "has_sample": "YES", "fresh": "YES", "north_usable": "YES",
+        fields = {"available": "YES", "has_sample": "YES", "fresh": "YES", "protocol": "2", "feedback": "AS5600", "level_set": "YES", "north_set": "YES",
                   "pitch_axis": "PITCH", "age_ms": "10", "heading": "100", "physical_pitch": "30"}
         target = EquatorialTarget(5.25, 22.5)
         for here in (True, False):
             auto = AutoSession()
+            auto.receive("ORIENTATION_STATE protocol=2 feedback=AS5600 available=YES fresh=YES north_set=YES level_set=YES age_ms=10 heading=0 physical_pitch=0", 1)
             auto.configure_celestial(Observer(42, -83, 200), self.reference)
             worker = FakeWorker()
             auto.celestial.worker = worker
@@ -128,7 +130,7 @@ class CelestialControlTests(unittest.TestCase):
             self.assertIsNone(auto.deadline)
             for second in range(2, 65):
                 now = second * 1.1
-                auto.receive("CELESTIAL_STATE id=1 mode=TRACK feedback=AS5600 bno=DEGRADED", now)
+                auto.receive("CELESTIAL_STATE id=1 mode=TRACK feedback=AS5600 encoder=DEGRADED", now)
                 auto.frame(now)
                 generation, job_target, requested_at = worker.jobs[-1]
                 self.assertEqual(job_target, target)
@@ -143,9 +145,9 @@ class CelestialControlTests(unittest.TestCase):
         self.assertTrue(all(command.startswith(b"CELESTIAL_UPDATE ") for command in streams[0][1:]))
 
     def test_track_here_rejects_missing_alignment_without_affecting_manual(self):
-        valid = {"available": "YES", "has_sample": "YES", "fresh": "YES", "north_usable": "YES",
+        valid = {"available": "YES", "has_sample": "YES", "fresh": "YES", "protocol": "2", "feedback": "AS5600", "level_set": "YES", "north_set": "YES",
                  "pitch_axis": "PITCH", "age_ms": "10", "heading": "100", "physical_pitch": "30"}
-        cases = [(None, None), ({**valid, "north_usable": "NO"}, .9),
+        cases = [(None, None), ({**valid, "north_set": "NO"}, .9),
                  ({**valid, "fresh": "NO"}, .9), ({**valid, "heading": "nan"}, .9),
                  ({**valid, "age_ms": "3000"}, .9)]
         for fields, received_at in cases:
@@ -161,7 +163,7 @@ class CelestialControlTests(unittest.TestCase):
         self.assertEqual(manual.frame(1.12, 100, -50, 25), b"JOG 100 -50 25\n")
 
     def test_track_here_worker_start_failure_is_local(self):
-        fields = {"available": "YES", "has_sample": "YES", "fresh": "YES", "north_usable": "YES",
+        fields = {"available": "YES", "has_sample": "YES", "fresh": "YES", "protocol": "2", "feedback": "AS5600", "level_set": "YES", "north_set": "YES",
                   "pitch_axis": "PITCH", "age_ms": "10", "heading": "100", "physical_pitch": "30"}
         self.worker.capture = lambda *args: (_ for _ in ()).throw(RuntimeError("worker unavailable"))
         with self.assertRaisesRegex(ValueError, "worker unavailable"):
@@ -182,7 +184,7 @@ class CelestialControlTests(unittest.TestCase):
         self.auto.receive("M09 READY", .2)
         self.assertTrue(self.auto.frame(.3).startswith(b"CELESTIAL_GOTO "))
 
-    def test_worker_failure_is_local_stop_and_manual_recovers_without_bno(self):
+    def test_worker_failure_is_local_stop_and_manual_recovers_without_encoder(self):
         for reason in ("missing Astropy", "below horizon", "pitch guard", "invalid UTC"):
             with self.subTest(reason=reason):
                 self.setUp()
@@ -193,7 +195,7 @@ class CelestialControlTests(unittest.TestCase):
                 self.auto.receive("M09 READY", .2)
                 self.assertFalse(self.auto.busy)
                 manual = ManualSession()
-                manual.receive("BNO_STATE available=NO fresh=NO accuracy=0", .2)
+                manual.receive("ORIENTATION_STATE protocol=2 feedback=AS5600 level_set=YES north_set=YES available=NO fresh=NO accuracy=0", .2)
                 manual.receive("M09 READY", .2)
                 self.assertTrue(manual.arm(.3, True))
                 self.assertEqual(manual.frame(.3, 0, 0), b"JOG 0 0 0\n")
@@ -260,9 +262,9 @@ class CelestialControlTests(unittest.TestCase):
             self.auto.receive("M09 READY", .4)
             self.assertIsNone(self.auto.frame(2))
 
-    def test_stale_missing_low_quality_bno_terminal_recovers(self):
+    def test_stale_missing_low_quality_encoder_terminal_recovers(self):
         for starter in ("goto", "track"):
-            for reason in ("BNO_stale", "BNO_unavailable", "accuracy_below_2"):
+            for reason in ("encoder_stale", "encoder_unavailable", "encoder_bad_magnet"):
                 with self.subTest(starter=starter, reason=reason):
                     self.setUp()
                     getattr(self, starter)()
@@ -358,7 +360,7 @@ class CoordinateWorkerTests(unittest.TestCase):
                 pass
             def altaz(self, target, utc):
                 return HorizontalTarget(101, 42, utc)
-        worker = CoordinateWorker(Observer(42, -83), HeadingReference(5, 1, 2), Converter, lambda: UTC)
+        worker = CoordinateWorker(Observer(42, -83), HeadingReference(5, 1, 2, north_reference="magnetic"), Converter, lambda: UTC)
         original = worker._replace
         def replace(mailbox, item):
             original(mailbox, item)
@@ -385,7 +387,7 @@ class CoordinateWorkerTests(unittest.TestCase):
             def equatorial(self, horizontal, utc):
                 self.horizontal, self.utc = horizontal, utc
                 return target
-        reference = HeadingReference(5, 1, 2)
+        reference = HeadingReference(5, 1, 2, north_reference="magnetic")
         worker = CoordinateWorker(Observer(42, -83), reference, Converter, lambda: UTC)
         original = worker._replace
         def replace(mailbox, item):

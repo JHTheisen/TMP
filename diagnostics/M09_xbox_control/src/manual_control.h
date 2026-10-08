@@ -10,7 +10,7 @@ bool manualMotorsStopped() {
 bool manualReady() {
     if (!controlReady || !commandIdle() || !commandWatchdog.configured() || !manualMotorsStopped()) return false;
     // Drain any prior orientation-watchdog callback before this independent
-    // manual session. A missing BNO watchdog never prevents manual readiness.
+    // manual session. A missing encoder watchdog never prevents manual readiness.
     if (motionWatchdog.configured()) {
         motionWatchdog.disarm();
         if (!motionWatchdog.clearTripWhenStopped()) return false;
@@ -46,7 +46,7 @@ void beginManual() {
     motionWatchdog.disarm();
     manualActive = true; manualEnding = false; finalPrinted = false;
     operation = Operation::MANUAL; phase = Phase::MANUAL;
-    yawRequired = accuracyRequired = false; accuracyGrace = {};
+    yawRequired = false;
     // A centered session has no continuous motion to abandon. Its command
     // lease starts before the first nonzero request can reach a motor.
     queueText("MANUAL READY: JOG yaw pitch carriage [-1000,1000] every 20 ms; STOP exits; X aborts\n");
@@ -221,8 +221,8 @@ void serviceManual() {
     if (now - lastDisplay >= 250) {
         lastDisplay = now;
         char line[260];
-        snprintf(line, sizeof(line), "MANUAL_STATE yaw_cmd=%d pitch_cmd=%d carriage_cmd=%d heading=%.3f pitch_roll=%.3f yaw_hz=%.1f pitch_hz=%.1f carriage_hz=%.1f carriage_steps=%ld\n",
-            manualYaw.request, manualPitch.request, manualCarriage.request, orientation.heading, orientation.roll,
+        snprintf(line, sizeof(line), "MANUAL_STATE yaw_cmd=%d pitch_cmd=%d carriage_cmd=%d heading=%.3f physical_pitch=%.3f yaw_hz=%.1f pitch_hz=%.1f carriage_hz=%.1f carriage_steps=%ld\n",
+            manualYaw.request, manualPitch.request, manualCarriage.request, orientation.heading, physicalPitch(),
             yawMotor->getCurrentSpeedInMilliHz() / 1000.0, pitchMotor->getCurrentSpeedInMilliHz() / 1000.0,
             carriageMotor->getCurrentSpeedInMilliHz() / 1000.0,
             static_cast<long>(carriageMotor->getCurrentPosition()));

@@ -81,7 +81,7 @@ class NamedAstronomyTests(unittest.TestCase):
         self.assertEqual(northern._observer.pressure, 0)
 
     def test_worker_recomputes_named_body_each_update_and_uses_existing_reference(self):
-        reference = HeadingReference(magnetic_declination_deg=5)
+        reference = HeadingReference(magnetic_declination_deg=5, north_reference="magnetic")
         times = iter((UTC, UTC + timedelta(minutes=10)))
         worker = CoordinateWorker(OBSERVER, reference, utc_clock=lambda: next(times))
         try:
@@ -137,7 +137,7 @@ class TargetSelectorTests(unittest.TestCase):
         finally:
             pygame.quit()
 
-    def test_selected_sun_uses_one_existing_goto_then_updates_without_bno_gate(self):
+    def test_selected_sun_uses_one_existing_goto_then_updates_without_encoder_gate(self):
         import pygame
         class Preview:
             def __init__(self, observer):

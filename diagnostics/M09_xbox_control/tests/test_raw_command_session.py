@@ -251,7 +251,7 @@ class CarriageReceiptTests(unittest.TestCase):
 
     def test_other_reports_do_not_invent_or_refresh_carriage_count(self):
         self.session.receive("POSE_STATE active=NO carriage_steps=42", 1.0)
-        for line in ("STATE MANUAL heading=10", "M09 READY", "BNO_STATE carriage_steps=999",
+        for line in ("STATE MANUAL heading=10", "M09 READY", "ORIENTATION_STATE protocol=2 feedback=AS5600 level_set=YES north_set=YES carriage_steps=999",
                      "POSE ACCEPTED carriage_steps=900", "MANUAL_STATE carriage_cmd=500",
                      "POSE_STATE carriage_steps=not-an-integer", "POSE_STATE carriage_steps=2.5"):
             with self.subTest(line=line):

@@ -15,7 +15,7 @@ static bool near(double actual, double expected, double tolerance = 1e-8) {
 }
 
 // Independent time-step integration checks the continuous-slew root calculation
-// against an ideal frozen BNO response, including braking during acceleration.
+// against an ideal frozen encoder response, including braking during acceleration.
 // The 0.5-second comparison tolerance allows one additional small correction
 // when sample-time rounding places the result across the 0.10-degree deadband.
 static double sampledAxisSeconds(double error, bool pitch, double response, double retainedPeak, uint32_t cap) {

@@ -24,7 +24,7 @@ void beginPoseStop(const char *reason = "operator STOP") {
     if (yawMotor && yawMotor->isRunning()) yawMotor->stopMove();
     if (pitchMotor && pitchMotor->isRunning()) pitchMotor->stopMove();
     if (carriageMotor && carriageMotor->isRunning()) carriageMotor->stopMove();
-    // Every participating axis has received braking. BNO loss must not replace
+    // Every participating axis has received braking. encoder loss must not replace
     // normal braking with a feedback-dependent operation or block cancellation.
     motionWatchdog.disarm();
     queueText("POSE STOPPING: "); queueText(reason); queueText("; braking all moving axes\n");

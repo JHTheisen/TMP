@@ -37,7 +37,6 @@ void rejectKeyframe(const char *command, uint32_t id, const char *reason) {
     queueText(line);
 }
 void snapshotKeyframe(uint32_t id) {
-    checkSensorReset();
     if (!controlReady || !commandIdle() || !poseMotorsStopped()) {
         rejectKeyframe("SNAP", id, "READY and all motors stopped required"); return;
     }
@@ -45,11 +44,11 @@ void snapshotKeyframe(uint32_t id) {
     char line[450];
     snprintf(line, sizeof(line),
         "KEYFRAME_SNAPSHOT id=%lu epoch=%lu yaw_steps=%ld pitch_steps=%ld carriage_steps=%ld "
-        "heading=%.3f physical_pitch=%.3f bno_valid=%s bno_age_ms=%lu accuracy=%u north_usable=%s unhomed=YES\n",
+        "heading=%.3f physical_pitch=%.3f feedback=AS5600 orientation_valid=%s orientation_age_ms=%lu north_set=%s unhomed=YES\n",
         static_cast<unsigned long>(id), static_cast<unsigned long>(keyframeEpoch),
         static_cast<long>(yawMotor->getCurrentPosition()), static_cast<long>(pitchMotor->getCurrentPosition()),
-        static_cast<long>(carriageMotor->getCurrentPosition()), lastPlausibleOrientation.heading, physicalPitch(lastPlausibleOrientation),
-        fresh(now) ? "YES" : "NO", static_cast<unsigned long>(hasPlausibleOrientation ? now - lastPlausibleAt : UINT32_MAX), lastPlausibleAccuracy,
+        static_cast<long>(carriageMotor->getCurrentPosition()), orientation.heading, physicalPitch(),
+        fresh(now) ? "YES" : "NO", static_cast<unsigned long>(fresh(now) ? now - lastFeedbackAt : UINT32_MAX),
         fresh(now) && northUsable ? "YES" : "NO");
     queueText(line);
 }
@@ -158,7 +157,6 @@ void serviceKeyframe() {
 }
 
 void beginKeyframe(uint32_t id, uint32_t epoch, const int32_t targets[3], uint32_t durationMs, bool travel = false) {
-    checkSensorReset();
     if (!commandIdle() || !controlReady || !poseMotorsStopped()) {
         rejectKeyframe("KEYMOVE", id, "READY and all motors stopped required"); return;
     }
@@ -207,8 +205,8 @@ void beginKeyframe(uint32_t id, uint32_t epoch, const int32_t targets[3], uint32
     keyframe = {}; keyframe.travel = travel; keyframe.id = id; keyframe.durationMs = durationMs;
     for (unsigned axis = 0; axis < 3; ++axis) keyframe.axes[axis] = plans[axis];
     keyframe.started = millis(); keyframeActive = true;
-    finalPrinted = false; phase = Phase::MOVING; window.active = false;
-    yawRequired = accuracyRequired = false;
+    finalPrinted = false; phase = Phase::MOVING;
+    yawRequired = false;
     char line[420];
     snprintf(line, sizeof(line), "KEYMOVE ACCEPTED id=%lu epoch=%lu duration_ms=%lu basis=GENERATED_STEPS unhomed=YES speed_millihz=%lu/%lu/%lu acceleration=%ld/%ld/%ld\n",
         static_cast<unsigned long>(id), static_cast<unsigned long>(keyframeEpoch), static_cast<unsigned long>(durationMs),

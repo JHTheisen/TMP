@@ -6,7 +6,7 @@ struct PitchDirectionDiagnostics {
     unsigned emitted = 0;
     bool checkPending = false;
     uint32_t levelCheckAt = 0;
-    int levelRequestedBnoDirection = 0, levelStepSign = 0;
+    int levelRequestedAxisDirection = 0, levelStepSign = 0;
     bool levelCheckPending = false;
 } pitchDirectionDiagnostics;
 
@@ -48,7 +48,7 @@ void tracePitchDirection(const char *event, const char *call = "none", int rc = 
     d.suppressed = 0;
 }
 void traceLevelPitchDirection(const char *event, const Axis &axis, const char *mode,
-                              int requestedBnoDirection, int32_t steps, const char *call, int rc) {
+                              int requestedAxisDirection, int32_t steps, const char *call, int rc) {
     if (!alignmentActive() || operation != Operation::LEVEL || !axis.pitch) return;
     auto &d = pitchDirectionDiagnostics;
     if (!allowPitchDirectionTrace()) return;
@@ -56,18 +56,18 @@ void traceLevelPitchDirection(const char *event, const Axis &axis, const char *m
     const unsigned dir = pitchDirOutputReadback();
     char line[384];
     snprintf(line, sizeof(line),
-        "LEVEL_DIR at_ms=%lu event=%s pitch=%.3f target=%.3f error=%.3f mode=%s requested_bno_dir=%d step_sign=%d steps=%ld call=%s rc=%d dir26_out=%u motor_mHz=%ld suppressed=%lu\n",
+        "LEVEL_DIR at_ms=%lu event=%s pitch=%.3f target=%.3f error=%.3f mode=%s requested_encoder_dir=%d step_sign=%d steps=%ld call=%s rc=%d dir26_out=%u motor_mHz=%ld suppressed=%lu\n",
         (unsigned long)millis(), event, physicalPitch(), axis.target, axis.error,
-        mode, requestedBnoDirection, stepSign, (long)steps, call, rc, dir,
+        mode, requestedAxisDirection, stepSign, (long)steps, call, rc, dir,
         (long)pitchMotor->getCurrentSpeedInMilliHz(), (unsigned long)d.suppressed);
     queueText(line);
     d.suppressed = 0;
 }
-void armLevelPitchDirectionCheck(int requestedBnoDirection, int stepSign) {
+void armLevelPitchDirectionCheck(int requestedAxisDirection, int stepSign) {
     auto &d = pitchDirectionDiagnostics;
     if (!alignmentActive() || operation != Operation::LEVEL) return;
     d.levelCheckPending = true; d.levelCheckAt = millis();
-    d.levelRequestedBnoDirection = requestedBnoDirection;
+    d.levelRequestedAxisDirection = requestedAxisDirection;
     d.levelStepSign = stepSign;
 }
 void serviceLevelPitchDirectionCheck() {
@@ -79,7 +79,7 @@ void serviceLevelPitchDirectionCheck() {
     if (millis() - d.levelCheckAt < 100) return;
     d.levelCheckPending = false;
     traceLevelPitchDirection("DIR_CHECK", pitchAxis, motionText(pitchAxis),
-        d.levelRequestedBnoDirection, d.levelStepSign, "latch", static_cast<int>(MOVE_OK));
+        d.levelRequestedAxisDirection, d.levelStepSign, "latch", static_cast<int>(MOVE_OK));
 }
 void servicePitchDirectionCheck() {
     auto &d = pitchDirectionDiagnostics;

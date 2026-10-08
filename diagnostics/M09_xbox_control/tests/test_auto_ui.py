@@ -34,20 +34,20 @@ def hat(value):
 
 
 class AutoUiTests(unittest.TestCase):
-    def test_bno_display_failures_leave_manual_and_keyframe_serial_stream_unchanged(self):
+    def test_encoder_display_failures_leave_manual_and_keyframe_serial_stream_unchanged(self):
         actions = [(.7, lambda port: port.axes.__setitem__(1, -.8)),
                    (.8, lambda port: port.axes.__setitem__(1, 0)),
                    (.9, tap(4)), (1.2, tap(5)), (1.8, tap(10))]
         baseline = self.run_ui(actions, until=3.5)
         def telemetry(port):
-            port.rx += (b"BNO_STATE available=YES has_sample=YES fresh=YES age_ms=10 "
-                        b"accuracy=3 heading=123 physical_pitch=12 pitch_axis=PITCH pitch_roll=-5\n")
+            port.rx += (b"ORIENTATION_STATE protocol=2 feedback=AS5600 level_set=YES north_set=YES available=YES has_sample=YES fresh=YES age_ms=10 "
+                        b"heading=123 physical_pitch=12 pitch_axis=PITCH roll=UNAVAILABLE\n")
         def failed(port):
-            port.rx += (b"BNO_STATE available=NO has_sample=NO fresh=NO age_ms=4294967295 "
-                        b"accuracy=bad heading=nan physical_pitch=inf pitch_roll=garbage\n")
+            port.rx += (b"ORIENTATION_STATE protocol=2 feedback=AS5600 level_set=YES north_set=YES available=NO has_sample=NO fresh=NO age_ms=4294967295 "
+                        b"heading=nan physical_pitch=inf roll=UNAVAILABLE\n")
         def stale(port):
-            port.rx += (b"BNO_STATE available=YES has_sample=YES fresh=NO age_ms=4000 "
-                        b"accuracy=0 heading=123 physical_pitch=12 pitch_axis=PITCH pitch_roll=-5\n")
+            port.rx += (b"ORIENTATION_STATE protocol=2 feedback=AS5600 level_set=YES north_set=YES available=YES has_sample=YES fresh=NO age_ms=4000 "
+                        b"heading=123 physical_pitch=12 pitch_axis=PITCH roll=UNAVAILABLE\n")
         result, writes, _, auto, frames, _ = self.run_ui(
             actions + [(.65, telemetry), (.75, failed), (1.0, stale), (1.9, failed), (2.4, telemetry)],
             until=3.5)
@@ -59,7 +59,7 @@ class AutoUiTests(unittest.TestCase):
         rows = [row for _, frame in frames for row in frame]
         self.assertIn("UNAVAILABLE", rows)
         self.assertIn("STALE", rows)
-        self.assertIn("Pitch 12.00°", rows)
+        self.assertIn("12.000°", rows)
 
     def run_ui(self, actions=(), *, until=2.5, dry_run=False, snapshots=True):
         class Clock:
@@ -104,7 +104,7 @@ class AutoUiTests(unittest.TestCase):
                 elif words[0] == "SNAP" and snapshots:
                     self.rx += (f"KEYFRAME_SNAPSHOT id={words[1]} epoch=42 yaw_steps={self.positions[0]} "
                                 f"pitch_steps={self.positions[1]} carriage_steps={self.positions[2]} "
-                                "heading=290 physical_pitch=-40 bno_valid=YES bno_age_ms=10 accuracy=1 north_usable=NO unhomed=YES\n").encode()
+                                "heading=290 physical_pitch=-40 orientation_valid=YES orientation_age_ms=10 unhomed=YES\n").encode()
                 elif words[0] in ("KEYMOVE", "KEYRETURN"):
                     self.mode = "BUSY"
                     self.rx += f"KEYMOVE ACCEPTED id={words[1]} epoch=42 duration_ms={words[6] if len(words) == 7 else 200}\nM09 BUSY\n".encode()
@@ -147,7 +147,7 @@ class AutoUiTests(unittest.TestCase):
                                 if ident else b"FINAL RESULT: PASS\n")
                 port.rx += b"M09 READY\n"
                 if port.outcome != "PASS":
-                    port.rx += b"OPERATION FAILED: BNO recovery expired\n"
+                    port.rx += b"OPERATION FAILED: ENCODER recovery expired\n"
             values = []
             for index, (at, items) in enumerate(schedule):
                 if clock.now >= at and index not in sent:

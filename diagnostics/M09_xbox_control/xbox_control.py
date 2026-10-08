@@ -6,6 +6,7 @@ import time
 from session_log import SessionLog
 from auto_control import AutoSession
 from operator_dashboard import OperatorDashboard
+from encoder_setup import EncoderSetup
 
 SEND_INTERVAL = 0.020
 COMMAND_TIMEOUT = 0.250  # Same command lease as the firmware; a lapse needs a new arm.
@@ -53,8 +54,6 @@ class ManualSession:
         self.sensor_status_at = None
         self.encoder_fields = {}
         self.encoder_status_at = {}
-        self.bno_raw_fields = {}
-        self.bno_raw_at = None
         self.celestial_fields = {}
         self.celestial_status_at = None
         self.pending_stop = False
@@ -85,12 +84,9 @@ class ManualSession:
             else:
                 self.carriage_steps = fields["carriage_steps"]
                 self.carriage_received_at = now
-        if line.startswith("BNO_STATE "):
+        if line.startswith("ORIENTATION_STATE "):
             self.sensor_fields = fields
             self.sensor_status_at = now
-        elif line.startswith("BNO_RAW "):
-            self.bno_raw_fields = fields
-            self.bno_raw_at = now
         elif line.startswith("ENCODER_STATE ") and fields.get("bus") in ("A", "B"):
             self.encoder_fields[fields["bus"]] = fields
             self.encoder_status_at[fields["bus"]] = now
@@ -99,13 +95,6 @@ class ManualSession:
             self.celestial_status_at = now
         elif line.startswith("STATE "):
             self.firmware_phase = line.split()[1]
-            # Accept older firmware's status without overwriting dedicated sensor reports.
-            if not self.sensor_fields or "available" not in self.sensor_fields:
-                self.sensor_fields = fields
-                self.sensor_status_at = now
-        if line.startswith("PITCH-ONLY READY:"):
-            self.firmware_phase = "PITCH-ONLY READY"
-            self.readiness_note = "North reference unavailable for absolute yaw; waiting for manual M09 READY."
         if line.startswith("Reason:"):
             self.last_reason = line
         if line == "M09 ABORTED" or "FINAL RESULT: FAIL" in line:
@@ -120,6 +109,10 @@ class ManualSession:
             self.disarm(line + " Rearm deliberately after READY.")
         elif line.startswith("M09_xbox_control:"):
             self.disarm("Firmware restarted; wait for READY and rearm.")
+            self.sensor_fields = {}
+            self.sensor_status_at = None
+            self.encoder_fields = {}
+            self.encoder_status_at = {}
             self.carriage_steps = self.carriage_received_at = None
             if self.raw_mode:
                 self.raw_waiting = True
@@ -142,7 +135,7 @@ class ManualSession:
                 self.readiness_note = "Center sticks for 0.5 s to enable manual control."
         elif line == "M09 BUSY":
             self.ready = False
-            if self.state in ("active", "arming 
+            if self.state in ("active", "arming"):
                 self.disarm("Firmware unavailable; wait for READY and rearm.", request_stop=True)
 
     def diagnostic_lines(self, now):
@@ -150,10 +143,10 @@ class ManualSession:
         age = "no report" if self.sensor_status_at is None else f"received {now - self.sensor_status_at:.1f} s ago"
         rows = [
             f"Firmware: {self.firmware_phase} | {self.readiness_note}",
-            f"Last BNO status ({age}): available={fields.get('available', '?')}; accuracy={fields.get('accuracy', '?')}; "
-            f"fresh={fields.get('fresh', fields.get('BNO_fresh', '?'))}; sample_age_ms={fields.get('age_ms', '?')}; has_sample={fields.get('has_sample', '?')}",
-            f"Last measured heading={fields.get('heading', '?')} deg; physical pitch/{fields.get('pitch_axis', 'ROLL')}={fields.get('physical_pitch', fields.get('pitch_roll', fields.get('pitch', '?')))} deg; "
-            f"north_usable={fields.get('north_usable', '?')}",
+            f"AS5600 orientation ({age}): available={fields.get('available', '?')}; "
+            f"fresh={fields.get('fresh', '?')}; sample_age_ms={fields.get('age_ms', '?')}; has_sample={fields.get('has_sample', '?')}",
+            f"Last measured heading={fields.get('heading', '?')} deg; physical pitch/{fields.get('pitch_axis', 'PITCH')}={fields.get('physical_pitch', '?')} deg; "
+            f"north_set={fields.get('north_set', '?')}; level_set={fields.get('level_set', '?')}; roll=UNAVAILABLE",
         ]
         carriage_age = ("no report" if self.carriage_received_at is None else
                         f"received {now - self.carriage_received_at:.1f} s ago")
@@ -167,12 +160,6 @@ class ManualSession:
                         f"valid={encoder.get('valid', '?')}; raw={encoder.get('raw', '?')}; "
                         f"angle={encoder.get('angle_deg', '?')} deg; age_ms={encoder.get('age_ms', '?')}; "
                         f"status={encoder.get('status', '?')}; magnet_good={encoder.get('magnet_good', '?')}")
-        if self.bno_raw_fields:
-            raw = self.bno_raw_fields
-            rows.append(f"Raw BNO (received {now - self.bno_raw_at:.1f} s ago): report={raw.get('report_id', '?')}; "
-                        f"status={raw.get('raw_status', '?')}; accepted={raw.get('accepted', '?')}; "
-                        f"age_ms={raw.get('age_ms', '?')}; reason={raw.get('reason', '?')}; "
-                        f"diagnostic_quality={raw.get('diagnostic_quality', '?')} (quaternion/Euler in log)")
         if self.state == "active" and now - self.last_rx > 1.0:
             rows.append("Telemetry delayed; live joystick commands continue. Firmware still stops on command loss.")
         return rows
@@ -261,10 +248,12 @@ def arguments(argv=None):
     parser.add_argument("--latitude", help="celestial observer latitude in decimal degrees, north positive")
     parser.add_argument("--longitude", help="celestial observer longitude in decimal degrees, east positive")
     parser.add_argument("--elevation", default="0", help="celestial observer elevation in metres, default 0")
+    parser.add_argument("--yaw-encoder-ratio", type=float, help="signed output yaw revolutions per encoder revolution; 1 for direct drive")
+    parser.add_argument("--pitch-encoder-ratio", type=float, help="signed output pitch revolutions per encoder revolution; e.g. 0.06666667 for 1:15")
+    parser.add_argument("--north-reference", choices=("true", "magnetic"), default="true", help="SET NORTH alignment method; magnetic requires declination")
     parser.add_argument("--magnetic-declination", help="configured true-minus-magnetic heading in degrees, east positive")
-    parser.add_argument("--heading-offset", default="0", help="optical azimuth offset after BNO heading direction and declination, in degrees")
-    parser.add_argument("--heading-direction", default="1", help="BNO heading to clockwise sky azimuth: +1 or -1; motor signs are unchanged")
-    parser.add_argument("--pitch-offset", default="0", help="optical altitude minus BNO physical pitch in degrees")
+    parser.add_argument("--heading-offset", default="0", help="optical azimuth offset after manual north reference and declination, in degrees")
+    parser.add_argument("--pitch-offset", default="0", help="optical altitude minus encoder pitch in degrees")
     for name, default in (("capture-a", 4), ("capture-b", 5), ("duration", 2),
                           ("play", 10), ("return-a", 8), ("increment", 9),
                           ("level", 0), ("north", 3)):
@@ -272,6 +261,10 @@ def arguments(argv=None):
                             help="pygame button index; confirm button/hat events with --dry-run")
     parser.add_argument("--move-hat", type=int, default=0, help="D-pad hat index; confirm with --dry-run")
     args = parser.parse_args(argv)
+    ratios = (args.yaw_encoder_ratio, args.pitch_encoder_ratio)
+    if any(value is not None for value in ratios) and any(
+            value is None or not math.isfinite(value) or not 0 < abs(value) <= 1 for value in ratios):
+        parser.error("supply both encoder ratios; each must be finite, nonzero, with magnitude <=1")
     if not 0.05 <= args.deadband <= 0.5:
         parser.error("--deadband must be between 0.05 and 0.5")
     if not 0 < args.speed_scale <= 1:
@@ -293,7 +286,7 @@ def configure_celestial(args, auto):
             raise ValueError("supply both --latitude and --longitude")
         reference = HeadingReference(
             None if args.magnetic_declination is None else float(args.magnetic_declination),
-            float(args.heading_offset), float(args.pitch_offset), int(args.heading_direction))
+            float(args.heading_offset), float(args.pitch_offset), args.north_reference)
         observer = (None if args.latitude is None else
                     Observer(float(args.latitude), float(args.longitude), float(args.elevation)))
         auto.configure_celestial(observer, reference)
@@ -314,6 +307,7 @@ def main(argv=None):
     port = None
     session = ManualSession()
     auto = AutoSession()
+    encoder_setup = EncoderSetup() if args.dry_run else EncoderSetup(args.yaw_encoder_ratio, args.pitch_encoder_ratio)
     celestial_config = configure_celestial(args, auto)
     print(celestial_config)
     log.event("CELESTIAL_CONFIG", celestial_config)
@@ -375,7 +369,7 @@ def main(argv=None):
         held_buttons = set()
         exit_hold = ExitHold()
         hat_neutral = True
-        input_notice = "LB/RB capture; Home plays; A = LEVEL; Y = magnetic NORTH."
+        input_notice = "LB/RB capture; Home plays; A = LEVEL; Y = calibrated NORTH."
         takeover = False
         failure_rearm = None
         celestial_last_status = None
@@ -413,6 +407,11 @@ def main(argv=None):
                         log.received(line, now)
                         session.receive(line, now)
                         auto.receive(line, now)
+                        configuring = encoder_setup.pending
+                        encoder_setup.receive(line)
+                        if configuring and encoder_setup.phase == "done":
+                            session.readiness_note = "Encoder ratios applied. Center sticks to arm; SET NORTH and SET LEVEL required."
+                            log.event("ENCODER_SETUP", session.readiness_note)
                         # Repeated BUSY polls must not push out the startup reason.
                         if line != "M09 BUSY":
                             lines = (lines + [line])[-8:]
@@ -427,7 +426,7 @@ def main(argv=None):
                 centered_since = None
                 takeover = False
                 log.event("MANUAL_REARM", "unexpected celestial failure; waiting for a fresh stick displacement")
-            session.auto_mode = auto.busy
+            session.auto_mode = auto.busy or encoder_setup.pending
             # Read current axes after receiving status; never replay pre-pause input.
             joystick_started = time.monotonic()
             raw = [joystick.get_axis(i) for i in range(joystick.get_numaxes())]
@@ -494,6 +493,7 @@ def main(argv=None):
                     send(b"X\n")
                 auto.receive("M09 ABORTED", now)
                 session.receive("M09 ABORTED", now)
+                encoder_setup.receive("M09 ABORTED")
                 takeover = False
                 centered_since = last_jog = None
                 log.event("EXIT_HOLD", "B: immediate latched abort; hold continuously for 2 seconds to exit")
@@ -505,7 +505,7 @@ def main(argv=None):
             toggling_raw = any(pressed(event, pygame.K_F2) for event in events)
             safety_stop = ("stop" in ui_actions or
                            any(pressed(event, pygame.K_F12) or pressed(event, pygame.K_SPACE) for event in events))
-            suppress_submit = safety_stop or toggling_raw or b_abort
+            suppress_submit = safety_stop or toggling_raw or b_abort or encoder_setup.pending
             if safety_stop:
                 takeover = False
                 centered_since = None
@@ -524,6 +524,8 @@ def main(argv=None):
                     log.event("DISPLAY", "frozen; controls and telemetry remain live" if display_frozen else "live; showing latest state")
                     continue
                 if key == pygame.K_F2 and not getattr(event, "repeat", False):
+                    if encoder_setup.pending:
+                        continue
                     dashboard.blur_editor()
                     takeover = False
                     auto.leave(now)
@@ -693,7 +695,7 @@ def main(argv=None):
                                 takeover = False
                                 send(data)
                         continue
-                    if action in ("level", "north", "capture_a", "capture_b", "return_a", "play", "play_stepped"):
+                    if action in ("set_north", "set_level", "level", "north", "capture_a", "capture_b", "return_a", "play", "play_stepped"):
                         if action == "play_stepped":
                             try:
                                 auto.photo_settings = dashboard.photo_settings()
@@ -732,7 +734,13 @@ def main(argv=None):
                 auto.cancel(now, "Joystick takeover: braking, then manual JOG.")
                 takeover = True
                 last_jog = None
-            session.auto_mode = auto.busy
+            session.auto_mode = auto.busy or encoder_setup.pending
+            if encoder_setup.pending:
+                centered_since = last_jog = None
+                session.readiness_note = "Applying encoder ratios; waiting for stopped READY and confirmation."
+                configuration = encoder_setup.frame(now)
+                if configuration is not None:
+                    send(configuration)
             if not session.raw_mode and not auto.busy and not suppress_submit and now >= next_send:
                 centered_ready = centered_since is not None and now - centered_since >= .5
                 if (failure_rearm is None or takeover) and session.arm(now, takeover or centered_ready):

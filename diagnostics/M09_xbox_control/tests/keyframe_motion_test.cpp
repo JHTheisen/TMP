@@ -48,12 +48,10 @@ void noRestart(size_t commands) {
 int main(int argc, char **argv) {
     CHECK(argc == 2);
     const std::string scenario = argv[1];
-    simulated::physicalPitchUsesRoll = false;
     simulated::baselineYaw = 20; simulated::baselinePitch = 8;
-    simulated::accuracy = 1; simulated::independentTick = tick;
-    if (scenario == "missing_bno") simulated::bnoInitFails = true;
+    simulated::independentTick = tick;
     setup(); advance(2200);
-    CHECK(commandIdle() && (pitchReady || scenario == "missing_bno") && !northUsable);
+    CHECK(commandIdle() && !pitchReady && !northUsable);
     const uint32_t epoch = snapshot(1);
     CHECK(epoch != 0);
     CHECK(Serial.output.find("yaw_steps=0 pitch_steps=0 carriage_steps=0") != std::string::npos);
@@ -85,8 +83,8 @@ int main(int argc, char **argv) {
         CHECK(Serial.output.find("axis=carriage requested_ms=1000") != std::string::npos);
         CHECK(Serial.output.find("min_ms=") != std::string::npos);
     } else if (scenario == "admission") {
-        pitchReady = referenceSet = bnoValid = northUsable = false;
-        simulated::bnoPauseStart = millis(); simulated::bnoPauseEnd = millis() + 20000;
+        pitchReady = referenceSet = northUsable = false;
+        Wire.encoder.present = Wire1.encoder.present = false;
         keymove(epoch); CHECK(keyframeActive); finishMove();
         CHECK(Serial.output.find("status=PASS") != std::string::npos);
         CHECK(snapshot(8) == epoch);
@@ -137,7 +135,7 @@ int main(int argc, char **argv) {
             CHECK(simulated::commands.back().at - begin <= 2);
             for (const auto &move : simulated::commands) CHECK(!move.continuous && move.speed <= 80 && move.acceleration <= 250);
             const auto count = simulated::commands.size();
-            if (scenario == "complete" || scenario == "zero_axis" || scenario == "missing_bno") {
+            if (scenario == "complete" || scenario == "zero_axis" || scenario == "missing_encoders") {
                 command("JOG 0 0 0"); CHECK(!manualActive);
                 command("SNAP 3");
                 CHECK(Serial.output.find("SNAP REJECTED id=3") != std::string::npos);
@@ -164,7 +162,10 @@ int main(int argc, char **argv) {
                 command("MOVE 0 0 100");
                 CHECK(poseActive && carriageMotor->getAcceleration() == CARRIAGE_ACCELERATION);
                 finishMove();
-                if (scenario == "missing_bno") { std::puts("PASS KEYMOVE with no BNO hardware"); return 0; }
+                if (scenario == "missing_encoders") { std::puts("PASS KEYMOVE with no encoder hardware"); return 0; }
+                Wire.encoder.present = Wire1.encoder.present = true;
+                advance(100);
+                command("ENCODER_CONFIG 360 360"); command("SET_NORTH"); command("SET_LEVEL");
                 command("MOVE 0 1 100"); advance(50);
                 CHECK(poseActive && carriageMotor->getAcceleration() == CARRIAGE_ACCELERATION);
                 command("STOP"); finishMove();
@@ -177,15 +178,14 @@ int main(int argc, char **argv) {
                     command("STOP"); // No restart or second motion.
                 } else if (scenario == "abort") command("X");
                 else if (scenario == "stale") {
-                    simulated::bnoPauseStart = millis(); simulated::bnoPauseEnd = millis() + 5000;
-                } else if (scenario == "reset") simulated::resetDuringPoll = true;
-                else if (scenario == "pitch_guard") simulated::pitchDisturbance = 70;
+                    Wire.encoder.present = Wire1.encoder.present = false;
+                } else if (scenario == "reset") Wire.encoder.present = false;
+                else if (scenario == "pitch_guard") simulated::encoderAxisDisturbance[1] = 70;
                 else if (scenario == "stall_stop") {
-                    injectAt = millis() + 30; simulated::blockBnoMs = 1000;
+                    injectAt = millis() + 30; Wire.encoder.present = true; Wire.encoder.requestDelayMs = 1000;
                     advance(1100);
                     CHECK(injected && handledAt && handledAt - injectAt <= 20);
-                    CHECK(bnoTrace.acquireMaxUs >= 1000000);
-                } else if (scenario == "stall_continue") { simulated::blockBnoMs = 1000; advance(1100); }
+                } else if (scenario == "stall_continue") { Wire.encoder.present = true; Wire.encoder.requestDelayMs = 1000; advance(1100); }
                 else if (scenario == "unexpected_stop") yawMotor->forceStop();
                 else { CHECK(false); }
                 if (scenario == "stale" || scenario == "reset" || scenario == "pitch_guard" || scenario == "stall_continue") {

@@ -80,6 +80,7 @@ public:
 
     // Index 0 is Bus A; index 1 is Bus B. No axis mapping is inferred here.
     const EncoderState &state(unsigned index) const { return states_[index]; }
+    void busRecovered(unsigned index) { states_[index].busAvailable = true; }
     uint32_t attempts(unsigned index) const { return states_[index].reads + states_[index].failures; }
 
 private:

@@ -6,7 +6,7 @@
 namespace {
 double fixedResidual = 0;
 void demand(double feedHz, double correctionHz) {
-    const double conversion = YAW_TRACK_PULSES_PER_DEG * bnoFeedbackStepSign(yawAxis);
+    const double conversion = YAW_TRACK_PULSES_PER_DEG * axisFeedbackStepSign(yawAxis);
     celestialTargetRate[0] = feedHz / conversion;
     auto &track = celestialTrackAxes[0];
     track.correction = correctionHz / conversion;
@@ -20,7 +20,7 @@ void samples(uint32_t duration, bool renew = true) {
     while (millis() - start < duration) {
         simulated::advance(10);
         if (renew) celestialUpdatedAt = millis();
-        lastBnoGood = millis(); // Accepted fresh, accurate fixture sample.
+        sensorWorker.testDispatch(); serviceEncoders();
         simulated::lastSampleAt = millis();
         yawAxis.error = fixedResidual - celestialTargetRate[0] *
             (millis() - celestialUpdatedAt) / 1000.0;
@@ -40,12 +40,12 @@ void zero() {
 int main(int argc, char **argv) {
     CHECK(argc == 2);
     const std::string scenario = argv[1];
-    simulated::physicalPitchUsesRoll = false;
     simulated::baselineYaw = 20; simulated::baselinePitch = 8;
     simulated::encoderPlantFeedback = true;
     simulated::latchIdleForceStop = true; simulated::forceStopDrainMs = 20;
     Wire.encoder.present = Wire1.encoder.present = true;
     setup(); advance(2200); begin();
+    simulated::motors[0].physicalSign = simulated::motors[1].physicalSign = 1;
     simulated::motors[0].stepPauses = true;
     simulated::motors[0].degreesPerStep = 1.0 / YAW_TRACK_PULSES_PER_DEG;
     const bool positive = scenario == "positive_zero_negative";

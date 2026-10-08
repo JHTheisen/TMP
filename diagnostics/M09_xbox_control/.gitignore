@@ -6,3 +6,4 @@ logs/
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+/encoder-migration-checkpoint.bundle

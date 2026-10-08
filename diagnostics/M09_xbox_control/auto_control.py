@@ -42,6 +42,21 @@ class AutoSession:
         self.photo_settings = PhotoSettings()
         self.stepped = None
         self.camera_events = []
+        self.orientation_fields = {}
+        self.orientation_received_at = None
+
+    def pointing_ready(self, now):
+        fields = self.orientation_fields
+        if self.orientation_received_at is None or any(fields.get(key) != value for key, value in (
+                ("protocol", "2"), ("feedback", "AS5600"), ("available", "YES"),
+                ("fresh", "YES"), ("north_set", "YES"), ("level_set", "YES"))):
+            return False
+        try:
+            age = float(fields["age_ms"]) / 1000 + max(0, now - self.orientation_received_at)
+            angles = (float(fields["heading"]), float(fields["physical_pitch"]))
+        except (KeyError, TypeError, ValueError):
+            return False
+        return math.isfinite(age) and 0 <= age <= 2.0 and all(math.isfinite(v) for v in angles)
 
     def _require_manual_rearm(self):
         self._manual_rearm_required = True
@@ -64,6 +79,8 @@ class AutoSession:
             raise ValueError("Wait for READY before celestial GOTO; request was not queued.")
         if not centered:
             raise ValueError("Center sticks for 0.5 s before celestial GOTO.")
+        if not dry_run and not self.pointing_ready(now):
+            raise ValueError("Celestial GOTO requires protocol 2, fresh AS5600 feedback, SET NORTH and SET LEVEL.")
         self.celestial_status = (target.name if isinstance(target, NamedTarget) else
                                  f"RA={target.ra_hours:.6f} h Dec={target.dec_deg:+.6f} deg")
         self.celestial_source = target.name if isinstance(target, NamedTarget) else "RA/DEC"
@@ -83,7 +100,7 @@ class AutoSession:
         return self._command("STOP")
 
     def request_track_here(self, now, centered, sensor_fields, sensor_received_at, dry_run=False):
-        """Capture the current BNO boresight and enter the existing sky tracker."""
+        """Capture the current encoder boresight and enter the existing sky tracker."""
         if self.celestial is None:
             raise ValueError("TRACK HERE needs valid --latitude and --longitude settings; manual remains available.")
         if not dry_run and (not self.enabled or self.phase != "READY"):
@@ -92,12 +109,12 @@ class AutoSession:
             raise ValueError("Center sticks for 0.5 s before TRACK HERE.")
         fields = sensor_fields or {}
         if sensor_received_at is None:
-            raise ValueError("TRACK HERE needs a recent BNO orientation report; manual remains available.")
+            raise ValueError("TRACK HERE needs a recent encoder orientation report; manual remains available.")
         required = (("available", "YES"), ("has_sample", "YES"), ("fresh", "YES"),
-                    ("north_usable", "YES"), ("pitch_axis", "PITCH"))
+                    ("protocol", "2"), ("feedback", "AS5600"), ("north_set", "YES"), ("level_set", "YES"), ("pitch_axis", "PITCH"))
         failed = [name for name, expected in required if fields.get(name) != expected]
         if failed:
-            raise ValueError("TRACK HERE needs fresh, north-qualified BNO heading and physical pitch "
+            raise ValueError("TRACK HERE needs fresh, calibrated encoder heading and physical pitch "
                              f"({', '.join(failed)} unavailable); manual remains available.")
         try:
             sample_age = float(fields["age_ms"]) / 1000.0
@@ -105,10 +122,10 @@ class AutoSession:
             heading = float(fields["heading"])
             pitch = float(fields["physical_pitch"])
         except (KeyError, TypeError, ValueError, OverflowError) as error:
-            raise ValueError("TRACK HERE received invalid BNO orientation telemetry; manual remains available.") from error
+            raise ValueError("TRACK HERE received invalid encoder orientation telemetry; manual remains available.") from error
         if (not all(math.isfinite(value) for value in (sample_age, receipt_age, heading, pitch)) or
                 sample_age < 0 or sample_age + receipt_age > 2.0):
-            raise ValueError("TRACK HERE BNO orientation is stale or invalid; manual remains available.")
+            raise ValueError("TRACK HERE encoder orientation is stale or invalid; manual remains available.")
         try:
             horizontal = self.celestial.reference.horizontal_from_mount(heading, pitch)
             self.celestial.reference.mount_target(horizontal)  # Existing horizon and pitch guards.
@@ -257,11 +274,17 @@ class AutoSession:
     def receive(self, line, now):
         self.last_rx = now
         fields = dict(token.split("=", 1) for token in line.split() if "=" in token)
+        if line.startswith("ORIENTATION_STATE "):
+            self.orientation_fields = fields
+            self.orientation_received_at = now
         if line.startswith(("M09_xbox_control:", "KEYFRAME_INVALIDATED ")) or line == "M09 ABORTED":
+            if line.startswith("M09_xbox_control:"):
+                self.orientation_fields = {}
+                self.orientation_received_at = None
             self.invalidate(line)
             if line.startswith("KEYFRAME_INVALIDATED ") and self._alignment():
                 # A forced watchdog stop loses captures but firmware may recover
-                # this BNO-dependent command. Do not invent a persistent host latch.
+                # this encoder-dependent command. Do not invent a persistent host latch.
                 return
             self.cancel(now, self.note)
             if line == "M09 ABORTED":
@@ -282,7 +305,7 @@ class AutoSession:
             elif self.phase == "PREFLIGHT_STOP":
                 if self.action in ("capture_a", "capture_b", "return_a", "play", "play_stepped"):
                     self._snapshot(now)
-                elif self.action in ("level", "north"):
+                elif self.action in ("set_north", "set_level", "level", "north"):
                     self._new_request(self.action, "MOVE_PENDING", now)
                     self.continuation = self._command(self.action.upper())
                 else:
@@ -331,7 +354,7 @@ class AutoSession:
                     self.deadline = None
                     self.note = "Tracking; move sticks to take over, Space/F12 STOP, B abort."
             if line.startswith("CELESTIAL_STATE "):
-                self.celestial_feedback = fields.get("feedback", "BNO") + " target/error yaw=" + fields.get("yaw_target", "?") + "/" + fields.get("yaw_error", "?") + " pitch=" + fields.get("pitch_target", "?") + "/" + fields.get("pitch_error", "?") + " deg"
+                self.celestial_feedback = fields.get("feedback", "UNKNOWN") + " target/error yaw=" + fields.get("yaw_target", "?") + "/" + fields.get("yaw_error", "?") + " pitch=" + fields.get("pitch_target", "?") + "/" + fields.get("pitch_error", "?") + " deg"
                 return
             if line.startswith("CELESTIAL_RESULT "):
                 if fields.get("status") == "FAILED":
@@ -346,6 +369,12 @@ class AutoSession:
                 self.cancel(now, line)
                 self.continuation = self._command("STOP")
                 return
+        if self.action in ("set_north", "set_level") and line.startswith("CALIBRATION "):
+            self._finish(line)
+            self.deadline = now + 4.0
+            if "REJECTED" in line:
+                self.continuation = self._command("STATUS")
+            return
         alignment = self._alignment()
         if alignment and line.startswith(alignment + " ACCEPTED") and self.phase == "MOVE_PENDING":
             self.phase = "MOVE_ACTIVE"

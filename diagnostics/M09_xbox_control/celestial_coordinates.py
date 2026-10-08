@@ -132,65 +132,63 @@ class HorizontalTarget:
 
 @dataclass(frozen=True)
 class MountTarget:
-    heading_deg: float  # Desired absolute BNO magnetic heading, as in POSE.
-    pitch_deg: float  # Desired BNO physical Euler pitch, NOT generated steps.
+    heading_deg: float  # Desired absolute encoder magnetic heading, as in POSE.
+    pitch_deg: float  # Desired calibrated encoder pitch, not generated steps.
 
 
 @dataclass(frozen=True)
 class HeadingReference:
-    """Keep true sky, BNO orientation and optical alignment explicitly separate.
+    """Map true sky azimuth into the operator's calibrated encoder frame.
 
-    true optical azimuth = heading_direction * BNO heading + declination + heading_offset
-    optical altitude = BNO physical pitch + pitch_offset
-
-    Declination is east-positive. None retains an explicitly reported raw
-    magnetic approximation; it does not claim magnetic north is true north.
-    Boresight offsets describe the optical axis relative to BNO, not motor signs.
+    SET_NORTH must align to true north unless magnetic mode and a measured
+    east-positive true-minus-magnetic declination are explicitly selected.
+    Axis handedness belongs to firmware encoder geometry, not this transform.
     """
     magnetic_declination_deg: float = None
     heading_offset_deg: float = 0.0
     pitch_offset_deg: float = 0.0
-    heading_direction: int = 1
+    north_reference: str = "true"
 
     def __post_init__(self):
         for field in ("magnetic_declination_deg", "heading_offset_deg", "pitch_offset_deg"):
             value = getattr(self, field)
             if value is not None or field != "magnetic_declination_deg":
                 object.__setattr__(self, field, _finite(value, field))
-        direction = _finite(self.heading_direction, "Heading direction")
-        if direction not in (-1, 1):
-            raise ValueError("Heading direction must be +1 or -1; it maps BNO angles, not motor signs")
-        object.__setattr__(self, "heading_direction", int(direction))
+        if self.north_reference not in ("true", "magnetic"):
+            raise ValueError("North reference must be true or magnetic")
+        if self.north_reference == "magnetic" and self.magnetic_declination_deg is None:
+            raise ValueError("Magnetic SET NORTH requires --magnetic-declination (east positive)")
+        if self.north_reference == "true" and self.magnetic_declination_deg is not None:
+            raise ValueError("Use --north-reference magnetic with declination; true SET NORTH needs no correction")
 
     def describe(self):
-        reference = ("raw magnetic NORTH approximation (true-north correction unconfigured)"
-                     if self.magnetic_declination_deg is None else
-                     f"configured true-north correction declination={self.magnetic_declination_deg:+.3f}deg east")
-        return (f"{reference}; BNO-to-azimuth direction={self.heading_direction:+d}; "
+        reference = ("SET NORTH aligned to true north" if self.north_reference == "true" else
+                     f"magnetic SET NORTH; configured true-north correction declination={self.magnetic_declination_deg:+.3f}deg east")
+        return (f"{reference}; clockwise encoder yaw; "
                 f"heading_offset={self.heading_offset_deg:+.3f}deg pitch_offset={self.pitch_offset_deg:+.3f}deg")
 
     def mount_target(self, horizontal):
         if horizontal.below_horizon:
             raise ValueError(f"Target is below the horizon (altitude={horizontal.altitude_deg:.3f}deg)")
         heading = ((horizontal.azimuth_deg - (self.magnetic_declination_deg or 0.0) % 360.0 -
-                    self.heading_offset_deg % 360.0) / self.heading_direction) % 360.0
+                    self.heading_offset_deg % 360.0)) % 360.0
         pitch = horizontal.altitude_deg - self.pitch_offset_deg
         # Existing combined POSE absolute pitch guard is strict at +/-75 degrees.
         # Firmware separately checks its continuous yaw/travel reference; a
         # wrapped heading alone cannot prove that an unwound route is reachable.
         if not -75.0 < pitch < 75.0:
-            raise ValueError(f"Target BNO pitch {pitch:.3f}deg reaches the existing +/-75deg pitch guard")
+            raise ValueError(f"Target encoder pitch {pitch:.3f}deg reaches the existing +/-75deg pitch guard")
         return MountTarget(heading, pitch)
 
     def horizontal_from_mount(self, heading_deg, pitch_deg, utc=None):
-        """Invert the existing optical/BNO mapping for a captured pointing."""
-        heading = _finite(heading_deg, "BNO heading")
-        pitch = _finite(pitch_deg, "BNO physical pitch")
+        """Invert the existing optical/encoder mapping for a captured pointing."""
+        heading = _finite(heading_deg, "encoder heading")
+        pitch = _finite(pitch_deg, "encoder physical pitch")
         if not 0 <= heading <= 360:
-            raise ValueError("BNO heading must be between 0 and 360 degrees")
+            raise ValueError("encoder heading must be between 0 and 360 degrees")
         if not -90 <= pitch <= 90:
-            raise ValueError("BNO physical pitch must be between -90 and 90 degrees")
-        azimuth = (self.heading_direction * heading + (self.magnetic_declination_deg or 0.0) +
+            raise ValueError("encoder physical pitch must be between -90 and 90 degrees")
+        azimuth = (heading + (self.magnetic_declination_deg or 0.0) +
                    self.heading_offset_deg) % 360.0
         altitude = pitch + self.pitch_offset_deg
         return HorizontalTarget(azimuth, altitude, utc)

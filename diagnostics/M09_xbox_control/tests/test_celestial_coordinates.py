@@ -15,14 +15,16 @@ from celestial_coordinates import (
 
 
 class CoordinateInputTests(unittest.TestCase):
-    def test_heading_handedness_is_separate_from_motor_directions(self):
-        reference = HeadingReference(5, 2, 1, heading_direction=-1)
+    def test_north_alignment_method_requires_explicit_declination(self):
+        reference = HeadingReference(5, 2, 1, north_reference="magnetic")
         mount = reference.mount_target(HorizontalTarget(97, 31))
-        self.assertEqual(mount.heading_deg, 270)
+        self.assertEqual(mount.heading_deg, 90)
         self.assertEqual(mount.pitch_deg, 30)
-        self.assertIn("direction=-1", reference.describe())
-        with self.assertRaises(ValueError):
-            HeadingReference(heading_direction=0)
+        for kwargs in ({"north_reference": "magnetic"}, {"magnetic_declination_deg": 5},
+                       {"north_reference": "invalid"}):
+            with self.assertRaises(ValueError):
+                HeadingReference(**kwargs)
+
 
     def test_decimal_hours_and_degrees_are_unambiguous(self):
         target = EquatorialTarget.parse("5.5", "-22.25")
@@ -115,23 +117,22 @@ class CoordinateInputTests(unittest.TestCase):
 
 
 class ReferenceTests(unittest.TestCase):
-    def test_raw_magnetic_assumption_is_reported(self):
+    def test_true_north_calibration_requirement_is_reported(self):
         reference = HeadingReference()
-        self.assertIn("raw magnetic", reference.describe())
-        self.assertIn("unconfigured", reference.describe())
+        self.assertIn("aligned to true north", reference.describe())
         mapped = reference.mount_target(HorizontalTarget(100, 25))
         self.assertEqual((mapped.heading_deg, mapped.pitch_deg), (100, 25))
 
     def test_declination_and_optical_offsets_remain_distinct(self):
-        reference = HeadingReference(10, 3, -2)
+        reference = HeadingReference(10, 3, -2, north_reference="magnetic")
         self.assertIn("configured true-north", reference.describe())
         mapped = reference.mount_target(HorizontalTarget(100, 25))
         self.assertEqual((mapped.heading_deg, mapped.pitch_deg), (87, 27))
-        self.assertEqual(HeadingReference(-10).mount_target(HorizontalTarget(355, 25)).heading_deg, 5)
-        self.assertIn("configured true-north", HeadingReference(0).describe())
+        self.assertEqual(HeadingReference(-10, north_reference="magnetic").mount_target(HorizontalTarget(355, 25)).heading_deg, 5)
+        self.assertIn("configured true-north", HeadingReference(0, north_reference="magnetic").describe())
 
     def test_mount_to_horizontal_is_the_exact_inverse_used_by_track_here(self):
-        for reference in (HeadingReference(), HeadingReference(12.5, -7.25, 3.5, -1)):
+        for reference in (HeadingReference(), HeadingReference(12.5, -7.25, 3.5, "magnetic")):
             for azimuth, altitude in ((0, 0), (123.456, 42.25), (359.9, 12.5)):
                 horizontal = HorizontalTarget(azimuth, altitude)
                 mount = reference.mount_target(horizontal)
@@ -170,7 +171,7 @@ class ReferenceTests(unittest.TestCase):
     def test_large_finite_angle_wrapping_cannot_overflow(self):
         difference = shortest_difference(1e308, -1e308)
         self.assertTrue(-180 <= difference < 180)
-        mapped = HeadingReference(-1e308, -1e308).mount_target(HorizontalTarget(350, 25))
+        mapped = HeadingReference(-1e308, -1e308, north_reference="magnetic").mount_target(HorizontalTarget(350, 25))
         self.assertTrue(0 <= mapped.heading_deg < 360)
 
 

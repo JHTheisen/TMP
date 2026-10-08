@@ -45,6 +45,10 @@ class HostUiTests(unittest.TestCase):
                     return len(data)
                 if data == b"STATUS\n":
                     self.rx += b"M09 MANUAL\n" if self.active else b"M09 READY\n"
+                    if scenario in ("encoder_setup", "encoder_restart"):
+                        self.rx += b"ORIENTATION_STATE protocol=2 feedback=AS5600\n"
+                elif data.startswith(b"ENCODER_CONFIG "):
+                    self.rx += b"CALIBRATION CONFIGURED: session only\nM09 READY\n"
                 elif data == b"JOG 0 0 0\n" and not self.active:
                     self.active = True
                     if scenario != "no_ack":
@@ -85,6 +89,9 @@ class HostUiTests(unittest.TestCase):
                 sent.add("fault")
                 if scenario == "disconnect":
                     result.append(pygame.event.Event(pygame.JOYDEVICEREMOVED, instance_id=42))
+                elif scenario == "encoder_restart":
+                    port.active = False
+                    port.rx += b"M09_xbox_control: restarted\nM09 READY\n"
                 elif scenario == "focus":
                     result.append(pygame.event.Event(pygame.WINDOWFOCUSLOST))
                 elif scenario == "pause":
@@ -102,7 +109,7 @@ class HostUiTests(unittest.TestCase):
                 elif scenario == "interrupt":
                     raise KeyboardInterrupt
                 elif scenario == "overflow":
-                    port.rx += b"?" * 20000 + b"\nBNO_STATE available=YES fresh=YES accuracy=0\n"
+                    port.rx += b"?" * 20000 + b"\nORIENTATION_STATE protocol=2 feedback=AS5600 level_set=YES north_set=YES available=YES fresh=YES accuracy=0\n"
             if scenario == "focus" and clock.now > 1.0 and "focus_return" not in sent:
                 sent.add("focus_return")
                 result.append(pygame.event.Event(pygame.WINDOWFOCUSGAINED))
@@ -117,6 +124,8 @@ class HostUiTests(unittest.TestCase):
              mock.patch.object(serial, "Serial", return_value=port) as open_port, \
              mock.patch.object(xbox_control, "time", clock):
             flags = ["--dry-run"] if scenario == "dry_run" else (["--invert-carriage"] if scenario == "inverted" else [])
+            if scenario in ("encoder_setup", "encoder_restart", "dry_run"):
+                flags += ["--yaw-encoder-ratio", "1", "--pitch-encoder-ratio", "0.06666667"]
             result = xbox_control.main(flags + ["--log-dir", log_dir])
             files = list(Path(log_dir).glob("*.log"))
             self.assertEqual(len(files), 1)
@@ -129,6 +138,10 @@ class HostUiTests(unittest.TestCase):
         else:
             open_port.assert_called_once_with("COM9", 115200, timeout=0, write_timeout=0.1)
             self.assertTrue(port.closed)
+            if scenario in ("encoder_setup", "encoder_restart"):
+                configs = [data for data in writes if data.startswith(b"ENCODER_CONFIG ")]
+                self.assertEqual(configs, [b"ENCODER_CONFIG 360 24.0000012\n"] * (2 if scenario == "encoder_restart" else 1))
+                self.assertLess(writes.index(configs[0]), next(i for i, data in enumerate(writes) if data.startswith(b"JOG ")))
             jogs = [value for value in writes if value.startswith(b"JOG")]
             if scenario == "uncentered":
                 self.assertEqual(jogs, [])
@@ -193,7 +206,7 @@ class HostUiTests(unittest.TestCase):
     def test_command_lease_lapse_disarms_before_nonzero_can_resume(self):
         self.run_ui("long_pause")
 
-    def test_abnormal_event_pump_latency_is_logged(self):
+    def test_aencoderrmal_event_pump_latency_is_logged(self):
         self.run_ui("timing")
 
     def test_receive_only_telemetry_gap_does_not_stop_live_commands(self):
@@ -232,6 +245,12 @@ class HostUiTests(unittest.TestCase):
 
     def test_uncentered_carriage_prevents_arming(self):
         self.run_ui("uncentered")
+
+    def test_encoder_ratios_are_sent_before_manual_arming(self):
+        self.run_ui("encoder_setup")
+
+    def test_encoder_ratios_are_resent_after_firmware_reboot(self):
+        self.run_ui("encoder_restart")
 
 
 if __name__ == "__main__":

@@ -51,11 +51,17 @@ void assertStoppedAndNoRestart(size_t commandCount) {
 int main(int argc, char **argv) {
     CHECK(argc == 2);
     const std::string scenario = argv[1];
-    simulated::physicalPitchUsesRoll = false;
     simulated::independentTick = tick;
     simulated::baselineYaw = 20; simulated::baselinePitch = 8;
-    if (scenario == "carriage" || scenario == "pending") simulated::bnoInitFails = true;
-    setup(); advance(2200);
+    Wire.encoder.present = Wire1.encoder.present = true;
+    simulated::encoderPlantFeedback = true;
+    setup(); advance(200);
+    simulated::motors[0].physicalSign = simulated::motors[1].physicalSign = 1;
+    encoderReferences[0].configure(360 * simulated::motors[0].degreesPerStep / .18);
+    encoderReferences[1].configure(360 * simulated::motors[1].degreesPerStep / .225);
+    CHECK(encoderReferences[0].setZero(sensorSnapshot.positions[0], millis()));
+    CHECK(encoderReferences[1].setZero(sensorSnapshot.positions[1], millis()));
+    serviceEncoders();
     CHECK(commandIdle() && manualReady());
     // STOP coverage is independent of first-run planner learning. These values
     // describe only the deterministic plant used by this offline fixture.
@@ -77,11 +83,10 @@ int main(int argc, char **argv) {
         const unsigned gentleStopsBefore = simulated::gentleStops;
         if (scenario == "stall") {
             injectStopAt = millis() + 50;
-            simulated::blockBnoMs = 1000;
+            Wire.encoder.requestDelayMs = 1000;
             advance(1100);
             CHECK(stopInjected && handledStopAt && handledStopAt - injectStopAt <= 20);
-            CHECK(bnoTrace.acquireMaxUs >= 1000000);
-            CHECK(Serial.output.find("feedback stale: acquisition gap") == std::string::npos);
+            Wire.encoder.requestDelayMs = 0;
         } else {
             if (scenario == "timeout") {
                 for (auto &motor : simulated::motors) motor.neverStops = true;

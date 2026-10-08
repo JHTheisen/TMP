@@ -29,20 +29,18 @@ class LoggingTests(unittest.TestCase):
         self.assertRegex(data, r"\d{4}-\d\d-\d\dT.*\+00:00 \+\d+\.\d+s")
         self.assertNotIn("STOP operator", second.path.read_text(encoding="utf-8"))
 
-    def test_quality_transition_is_immediate_and_traces_sampled_by_kind(self):
+    def test_reference_loss_is_logged_immediately(self):
         log = self.logger()
-        log.received("BNO_RAW raw_status=3 diagnostic_quality=PLAUSIBLE", 1.0)
-        log.received("BNO_RAW raw_status=3 diagnostic_quality=MALFORMED", 1.01)
-        log.received("BNO_TRACE kind=RESET_COMPLETE reset_event=1 at_us=123", 1.02)
-        log.received("BNO_TRACE kind=RESET_COMPLETE reset_event=2 at_us=456", 1.03)
-        log.received("BNO_TRACE kind=REPORT_ENABLED at_us=789", 1.04)
-        log.received("BNO_TRACE kind=RESET_COMPLETE reset_event=3 at_us=999", 6.03)
+        ready = "ORIENTATION_STATE north_set=YES level_set=YES fresh=YES heading=0"
+        log.received(ready, 1.0)
+        log.received(ready.replace("heading=0", "heading=1"), 1.01)
+        log.received(ready.replace("level_set=YES", "level_set=NO"), 1.02)
+        log.received("CALIBRATION LOST axis=PITCH", 1.03)
         data = log.path.read_text(encoding="utf-8")
-        self.assertIn("diagnostic_quality=MALFORMED", data)
-        self.assertIn("reset_event=1", data)
-        self.assertNotIn("reset_event=2", data)
-        self.assertIn("kind=REPORT_ENABLED", data)
-        self.assertIn("reset_event=3", data)
+        self.assertIn("level_set=NO", data)
+        self.assertIn("CALIBRATION LOST axis=PITCH", data)
+        self.assertNotIn("heading=1", data)
+
 
     def test_command_stream_is_sampled_but_edges_are_immediate(self):
         log = self.logger()
@@ -59,15 +57,15 @@ class LoggingTests(unittest.TestCase):
 
     def test_raw_values_and_sensor_transitions_without_parsed_duplicate(self):
         log = self.logger()
-        raw = "BNO_RAW report_id=0x05 raw_status=0 q_w=0.999938965 q_x=0 q_y=0 q_z=0 accepted=YES age_ms=2"
+        raw = "ENCODER_STATE bus=B raw=4095 status=0x20 magnet_good=YES age_ms=2"
         log.received(raw, 1.0)
-        log.received(raw.replace("raw_status=0", "raw_status=3"), 1.01)
+        log.received(raw.replace("magnet_good=YES", "magnet_good=NO"), 1.01)
         log.received("ENCODER_STATE bus=A available=YES valid=YES raw=2048 status=0x20", 1.02)
         log.received("ENCODER_STATE bus=A available=NO valid=NO raw=2048 status=0x20", 1.03)
         log.received("MANUAL REJECTED: stopping; wait for READY", 1.04)
         data = log.path.read_text(encoding="utf-8")
         self.assertIn(raw, data)
-        for value in ("raw_status=0", "raw_status=3", "q_w=0.999938965", "available=NO"):
+        for value in ("raw=4095", "magnet_good=YES", "magnet_good=NO", "available=NO"):
             self.assertIn(value, data)
         self.assertNotIn(" | parsed=", data)
         self.assertIn("MANUAL REJECTED: stopping; wait for READY", data)
@@ -91,7 +89,7 @@ class LoggingTests(unittest.TestCase):
         self.assertIn("disk full", log.error)
         log.event("STOP", "does not raise")
 
-    def test_abnormal_timing_only_and_slow_flush_are_recorded(self):
+    def test_aencoderrmal_timing_only_and_slow_flush_are_recorded(self):
         log = self.logger()
         log.timing("fast.operation", .149)
         log.timing("slow.operation", .151)

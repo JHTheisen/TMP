@@ -29,7 +29,7 @@ public:
         args.callback = timerCallback;
         args.arg = this;
         args.dispatch_method = ESP_TIMER_TASK;
-        args.name = "m08_bno_stop";
+        args.name = "m08_encoder_stop";
         if (esp_timer_create(&args, &timer_) != ESP_OK) return false;
         if (esp_timer_start_periodic(timer_, CHECK_INTERVAL_US) != ESP_OK) {
             esp_timer_delete(timer_);
@@ -86,7 +86,7 @@ public:
         return (state_.load(std::memory_order_acquire) & TRIPPED) != 0;
     }
 
-    // Public to let host fixtures advance the watchdog during a blocked BNO
+    // Public to let host fixtures advance the watchdog during a blocked encoder
     // call. Production invokes this from an independent periodic ESP timer.
     void check(uint32_t now) {
         CheckGuard guard(checking_);

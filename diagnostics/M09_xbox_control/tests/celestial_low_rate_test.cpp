@@ -27,10 +27,11 @@ void advance(uint32_t duration) {
     }
 }
 void begin() {
-    // Fixture represents previously measured, stopped encoder/step geometry.
-    // Separate primary-feedback tests exercise learning and missing scales.
-    celestialLearnedEncoderScale[0] = (360.0/4096) / (0.18 * YAW_TRACK_PULSES_PER_DEG);
-    celestialLearnedEncoderScale[1] = (360.0/4096) / (0.225 * PITCH_TRACK_PULSES_PER_DEG);
+    encoderReferences[0].configure(360.0 / (0.18 * YAW_TRACK_PULSES_PER_DEG));
+    encoderReferences[1].configure(360.0 / (0.225 * PITCH_TRACK_PULSES_PER_DEG));
+    CHECK(encoderReferences[0].setZero(sensorSnapshot.positions[0], millis()));
+    CHECK(encoderReferences[1].setZero(sensorSnapshot.positions[1], millis()));
+    serviceEncoders();
     yawTarget = orientation.heading; pitchTarget = physicalPitch();
     updateAt = millis(); sequence = 0;
     beginCelestial(71, yawTarget, pitchTarget);
@@ -58,13 +59,13 @@ void stop() {
 int main(int argc, char **argv) {
     CHECK(argc == 2);
     const std::string scenario = argv[1];
-    simulated::physicalPitchUsesRoll = false;
     simulated::baselineYaw = yawTarget; simulated::baselinePitch = pitchTarget;
     simulated::encoderPlantFeedback = true;
     simulated::latchIdleForceStop = true; simulated::forceStopDrainMs = 20;
     Wire.encoder.present = Wire1.encoder.present = true;
     setup(); advance(2200);
     for (unsigned i = 0; i < 2; ++i) {
+        simulated::motors[i].physicalSign = 1;
         simulated::motors[i].stepPauses = true;
         simulated::motors[i].degreesPerStep = 1.0 /
             (i == 0 ? YAW_TRACK_PULSES_PER_DEG : PITCH_TRACK_PULSES_PER_DEG);
@@ -98,7 +99,7 @@ int main(int argc, char **argv) {
     if (scenario == "stable" || scenario == "minimum_rate" || scenario == "startup_latch") {
         advance(scenario == "minimum_rate" ? 210000 : 120000); active();
         CHECK(simulated::commands.size() == starts);
-        CHECK(yawMotor->getCurrentPosition() < 0 && pitchMotor->getCurrentPosition() < 0);
+        CHECK(yawMotor->getCurrentPosition() > 0 && pitchMotor->getCurrentPosition() > 0);
         if (scenario == "startup_latch") CHECK(starts == 4);
     } else if (scenario == "unexpected_stop") {
         simulated::motors[0].drive = simulated::Drive::IDLE;
@@ -137,10 +138,14 @@ int main(int argc, char **argv) {
         if (scenario == "brake_stuck") simulated::motors[0].neverStops = true;
         if (scenario == "sensor_pause") {
             Wire.encoder.requestLength = 2;
-            advance(4000); active();
-            CHECK(celestialEncoderPaused && yawAxis.motion == Motion::BRAKING);
+            advance(4000);
+            CHECK(!celestialActive() && commandIdle() && poseMotorsStopped());
+            CHECK(!encoderReferences[0].calibrated);
             Wire.encoder.requestLength = 3;
-            advance(100000); active(); CHECK(!celestialEncoderPaused);
+            advance(1000);
+            beginCelestial(72, 0, 0);
+            CHECK(!celestialActive()); // Fresh data alone cannot restore a lost multi-turn reference.
+            return 0;
         } else if (scenario == "zero" || scenario == "below_minimum") {
             rate(scenario == "below_minimum" ? 0.004 : 0);
             advance(4000); active();
@@ -165,7 +170,7 @@ int main(int argc, char **argv) {
             CHECK(millis() - celestialTrackAxes[0].progressAt < CELESTIAL_TRACK_PROGRESS_MS);
             if (scenario == "reverse" || scenario == "pending_period") {
                 CHECK(yawAxis.motion == Motion::TRACK && pitchAxis.motion == Motion::TRACK);
-                CHECK(yawAxis.slewDirection == 1 && pitchAxis.slewDirection == 1);
+                CHECK(yawAxis.slewDirection == -1 && pitchAxis.slewDirection == -1);
                 CHECK(simulated::commands.size() == starts + 2);
                 for (const auto &cmd : simulated::commands) CHECK(!cmd.wasBraking && !cmd.beforeStoppedSample);
             } else {

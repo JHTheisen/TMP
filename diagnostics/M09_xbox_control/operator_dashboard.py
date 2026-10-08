@@ -297,35 +297,28 @@ class OperatorDashboard:
                      pygame.Rect(panel.right - 158, panel.y + 280, 144, 36), ACCENT if ready else PANEL)
 
     @staticmethod
-    def _health(fields, received_at, now, bno=False):
+    def _health(fields, received_at, now):
         if received_at is None:
             return "NO REPORT", RED
-        if now - received_at > 2.0:
-            return "STALE", AMBER
-        available = fields.get("available", "?")
-        fresh = fields.get("fresh", fields.get("BNO_fresh", "?"))
-        valid = fields.get("valid", "?")
         try:
-            low_accuracy = bno and "accuracy" in fields and int(fields["accuracy"]) < 2
-        except ValueError:
-            low_accuracy = False
-        if (available == "NO" or low_accuracy or (bno and fresh == "NO") or
-                (not bno and (valid == "NO" or fields.get("magnet_good") == "NO"))):
+            age = float(fields.get("age_ms", 0)) / 1000.0 + max(0, now - received_at)
+        except (TypeError, ValueError):
+            return "UNKNOWN", MUTED
+        if not math.isfinite(age) or age > 2.0:
+            return "STALE", AMBER
+        if (fields.get("available") == "NO" or fields.get("valid") == "NO" or
+                fields.get("magnet_good") == "NO"):
             return "DEGRADED", AMBER
-        if available == "YES" and ((bno and fresh == "YES") or (not bno and valid == "YES")):
+        if fields.get("available") == "YES" and fields.get("valid") == "YES":
             return "OK", GREEN
         return "UNKNOWN", MUTED
 
     @staticmethod
-    def _bno_orientation(fields, received_at, now):
-        """Read optional BNO_STATE angles for display only; never gate controls.
-
-        Current firmware declares physical_pitch as Euler PITCH and pitch_roll
-        as Euler roll. Do not substitute control targets or raw quaternions.
-        The two-second display timeout includes the sensor age at receipt.
-        """
+    def _encoder_orientation(fields, received_at, now):
+        """Display measured, calibrated axes only; roll is not measured."""
         if (received_at is None or fields.get("available") != "YES" or
-                fields.get("has_sample") != "YES" or fields.get("valid") == "NO"):
+                fields.get("has_sample") != "YES" or fields.get("valid") == "NO" or
+                fields.get("protocol") != "2" or fields.get("feedback") != "AS5600"):
             return "UNAVAILABLE", None
         try:
             age = float(fields["age_ms"]) / 1000.0
@@ -335,14 +328,16 @@ class OperatorDashboard:
             return "UNAVAILABLE", None
         if fields.get("fresh") == "NO" or age + max(0, now - received_at) > 2.0:
             return "STALE", None
+        if fields.get("north_set") != "YES" or fields.get("level_set") != "YES":
+            return "CALIBRATE", None
         if fields.get("fresh") != "YES" or fields.get("pitch_axis") != "PITCH":
             return "UNAVAILABLE", None
         try:
-            angles = tuple(float(fields[key]) for key in ("physical_pitch", "pitch_roll", "heading"))
+            angles = tuple(float(fields[key]) for key in ("physical_pitch", "heading"))
         except (KeyError, TypeError, ValueError, OverflowError):
             return "UNAVAILABLE", None
         if not all(math.isfinite(value) and lower <= value <= upper
-                   for value, (lower, upper) in zip(angles, ((-90, 90), (-180, 180), (0, 360)))):
+                   for value, (lower, upper) in zip(angles, ((-180, 180), (0, 360)))):
             return "UNAVAILABLE", None
         return "LIVE", angles
 
@@ -411,39 +406,26 @@ class OperatorDashboard:
         cards = [pygame.Rect(margin + i * (card_w + gap), cards_y, card_w, 88) for i in range(4)]
         for rect in cards:
             self._panel(screen, rect)
-        heading = session.sensor_fields.get("heading", "?")
-        physical_pitch = session.sensor_fields.get("physical_pitch", session.sensor_fields.get("pitch_roll", "?"))
-        if auto.action == "celestial":
-            try:
-                heading = f"{float(session.celestial_fields['yaw_target']) - float(session.celestial_fields['yaw_error']):.3f}"
-                physical_pitch = f"{float(session.celestial_fields['pitch_target']) - float(session.celestial_fields['pitch_error']):.3f}"
-            except (KeyError, TypeError, ValueError):
-                pass
+        orientation_status, angles = self._encoder_orientation(session.sensor_fields, session.sensor_status_at, now)
+        heading = f"{angles[1]:.3f}°" if angles else "--"
+        physical_pitch = f"{angles[0]:.3f}°" if angles else "--"
         self._text(screen, self.small, "YAW", (cards[0].x + 12, cards[0].y + 10), MUTED)
-        self._text(screen, self.title, f"{heading}°", (cards[0].x + 12, cards[0].y + 36))
+        self._text(screen, self.title, heading, (cards[0].x + 12, cards[0].y + 36))
         self._text(screen, self.small, f"stick {yaw:+d}", (cards[0].right - 90, cards[0].y + 12), MUTED)
         self._text(screen, self.small, "PITCH", (cards[1].x + 12, cards[1].y + 10), MUTED)
-        self._text(screen, self.title, f"{physical_pitch}°", (cards[1].x + 12, cards[1].y + 36))
+        self._text(screen, self.title, physical_pitch, (cards[1].x + 12, cards[1].y + 36))
         self._text(screen, self.small, f"stick {pitch:+d}", (cards[1].right - 90, cards[1].y + 12), MUTED)
-
-        bno_health, bno_color = self._health(session.sensor_fields, session.sensor_status_at, now, True)
-        orientation_status, angles = self._bno_orientation(session.sensor_fields, session.sensor_status_at, now)
-        self._text(screen, self.small, f"BNO {bno_health}", (cards[2].x + 12, cards[2].y + 6), bno_color)
-        if angles is not None:
-            for index, (label, angle) in enumerate(zip(("Pitch", "Roll", "Heading/yaw"), angles)):
-                self._text(screen, self.small, f"{label} {angle:.2f}\N{DEGREE SIGN}",
-                           (cards[2].x + 12, cards[2].y + 26 + index * 19))
-        else:
-            self._text(screen, self.font, orientation_status, (cards[2].x + 12, cards[2].y + 38), AMBER)
-        # Accuracy is informational even when too low for a north reference.
-        self._text(screen, self.small, f"acc {session.sensor_fields.get('accuracy', '?')}",
-                   (cards[2].right - 44, cards[2].y + 6), MUTED)
+        self._text(screen, self.small, "AS5600 REFERENCES", (cards[2].x + 12, cards[2].y + 6), MUTED)
+        self._text(screen, self.font, orientation_status, (cards[2].x + 12, cards[2].y + 25), GREEN if angles else AMBER)
+        for i, (key, label) in enumerate((("north_set", "NORTH"), ("level_set", "LEVEL"))):
+            value = session.sensor_fields.get(key, "NO")
+            self._text(screen, self.small, f"{label}: {'SET' if value == 'YES' else 'REQUIRED'}",
+                       (cards[2].x + 12, cards[2].y + 48 + i * 20), GREEN if value == "YES" else AMBER)
 
         enc_a, enc_a_color = self._health(session.encoder_fields.get("A", {}), session.encoder_status_at.get("A"), now)
         enc_b, enc_b_color = self._health(session.encoder_fields.get("B", {}), session.encoder_status_at.get("B"), now)
-        roll = session.sensor_fields.get("pitch_roll", "?")
         self._text(screen, self.small, "ROLL", (cards[3].x + 12, cards[3].y + 7), MUTED)
-        self._text(screen, self.title, f"{roll}\N{DEGREE SIGN}", (cards[3].x + 12, cards[3].y + 28), TEXT)
+        self._text(screen, self.font, "UNAVAILABLE", (cards[3].x + 12, cards[3].y + 28), TEXT)
         compact_health = {"NO REPORT": "--", "DEGRADED": "WARN", "UNKNOWN": "?"}
         encoder_summary = (f"ENC Y:{compact_health.get(enc_a, enc_a)}  "
                            f"P:{compact_health.get(enc_b, enc_b)}")
@@ -455,13 +437,13 @@ class OperatorDashboard:
         self._panel(screen, celestial)
         active = auto.action == "celestial"
         feedback = session.celestial_fields.get("feedback", "")
-        degraded = session.celestial_fields.get("bno") == "DEGRADED"
+        degraded = session.celestial_fields.get("encoder") == "UNAVAILABLE"
         celestial_label = "CELESTIAL TRACKING ACTIVE" if active else "CELESTIAL TARGET"
         self._text(screen, self.font, celestial_label, (celestial.x + 14, celestial.y + 12),
                    AMBER if degraded else (ACCENT if active else TEXT))
         self._button(screen, "targets", "Choose target", pygame.Rect(celestial.right - 138, celestial.y + 8, 124, 30))
         if active:
-            source = "ENCODER PROPAGATED / BNO DEGRADED" if degraded else ("AS5600 PRIMARY / BNO REFERENCE" if feedback == "AS5600" else feedback or "BNO REFERENCE")
+            source = "AS5600 FEEDBACK UNAVAILABLE" if degraded else "AS5600 ENCODER FEEDBACK"
             self._text(screen, self.small, source, (celestial.x + 310, celestial.y + 16), AMBER if degraded else GREEN)
         self._text(screen, self.small, auto.celestial_status or "No active celestial target", (celestial.x + 14, celestial.y + 42), MUTED)
         field_y = celestial.y + 68
@@ -484,7 +466,7 @@ class OperatorDashboard:
         self._panel(screen, controls)
         self._text(screen, self.small, "OPERATOR CONTROLS", (controls.x + 14, controls.y + 10), MUTED)
         self._button(screen, "photo_options", "Stepped photos...", pygame.Rect(controls.right - 164, controls.y + 3, 150, 27))
-        labels = [("level", "LEVEL"), ("north", "NORTH"), ("capture_a", "CAPTURE A"),
+        labels = [("set_north", "SET NORTH"), ("set_level", "SET LEVEL"), ("level", "LEVEL"), ("north", "NORTH"), ("capture_a", "CAPTURE A"),
                   ("capture_b", "CAPTURE B"), ("return_a", "RETURN A"), ("play", "PLAY A→B")]
         button_gap = 8
         button_w = (controls.width - 28 - button_gap * (len(labels) - 1)) // len(labels)

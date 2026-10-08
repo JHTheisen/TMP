@@ -96,9 +96,9 @@ class SessionTests(unittest.TestCase):
             self.assertEqual(self.session.state, "fault")
             self.assertFalse(self.session.arm(1, True))
             self.assertIsNone(self.session.frame(1.1, 250, 250))
-        self.session.receive("Reason: BNO085 feedback stale", 2)
+        self.session.receive("Reason: ENCODER085 feedback stale", 2)
         self.session.receive("FINAL RESULT: FAIL", 2)
-        self.assertIn("BNO085 feedback stale", self.session.readiness_note)
+        self.assertIn("ENCODER085 feedback stale", self.session.readiness_note)
 
     def test_rejection_stops_and_requires_new_centered_arm(self):
         self.arm()
@@ -129,7 +129,7 @@ class SessionTests(unittest.TestCase):
         self.assertFalse(self.session.arm(1.6, False))
 
     def test_pose_failure_does_not_latch_manual_fault(self):
-        self.session.receive("OPERATION FAILED: BNO unavailable", 1)
+        self.session.receive("OPERATION FAILED: ENCODER unavailable", 1)
         self.session.receive("M09 READY", 1.1)
         self.assertTrue(self.session.arm(1.2, True))
 
@@ -152,12 +152,12 @@ class SessionTests(unittest.TestCase):
 
     def test_dedicated_sensor_reports_preserve_health_and_receipt_age(self):
         self.arm()
-        self.session.receive("BNO_STATE available=NO fresh=NO age_ms=600 accuracy=0 north_usable=NO heading=nan pitch_roll=nan", 2)
+        self.session.receive("ORIENTATION_STATE protocol=2 feedback=AS5600 level_set=YES north_set=YES available=NO fresh=NO age_ms=600 heading=nan roll=UNAVAILABLE", 2)
         self.session.receive("ENCODER_STATE bus=A available=YES valid=YES raw=2048 angle_deg=180.000 age_ms=4 status=0x20", 2)
         self.session.receive("ENCODER_STATE bus=B available=YES valid=NO raw=100 angle_deg=8.789 age_ms=700 status=0x10", 2)
         self.session.receive("STATE MANUAL heading=999", 2.1)
         rows = "\n".join(self.session.diagnostic_lines(3.5))
-        self.assertIn("available=NO; accuracy=0; fresh=NO", rows)
+        self.assertIn("available=NO; fresh=NO", rows)
         self.assertIn("received 1.5 s ago", rows)
         self.assertIn("raw=2048; angle=180.000 deg", rows)
         self.assertIn("valid=NO; raw=100", rows)
@@ -165,31 +165,28 @@ class SessionTests(unittest.TestCase):
         self.assertNotIn("heading=999", rows)
         self.assertEqual(self.session.frame(3.5, 100, 0), b"JOG 100 0 0\n")
 
-    def test_raw_bno_does_not_overwrite_accepted_status(self):
-        self.session.receive("BNO_STATE has_sample=YES accuracy=3 fresh=NO age_ms=400", 1)
-        self.session.receive("BNO_RAW has_sample=YES report_id=0x05 raw_status=0 q_w=0 q_x=0 q_y=0 q_z=0 accepted=NO reason=invalid_quaternion age_ms=2", 2)
-        self.assertEqual(self.session.sensor_fields["accuracy"], "3")
-        self.assertEqual(self.session.bno_raw_fields["raw_status"], "0")
-        self.assertEqual(self.session.bno_raw_fields["q_w"], "0")
-        rows = "\n".join(self.session.diagnostic_lines(2.5))
-        self.assertIn("accuracy=3; fresh=NO", rows)
-        self.assertIn("status=0; accepted=NO; age_ms=2; reason=invalid_quaternion", rows)
+    def test_raw_encoder_does_not_overwrite_calibrated_orientation(self):
+        self.session.receive("ORIENTATION_STATE protocol=2 feedback=AS5600 north_set=YES level_set=NO fresh=NO", 1)
+        self.session.receive("ENCODER_STATE bus=A valid=YES raw=4095 angle_deg=359.912 magnet_good=YES", 2)
+        self.assertEqual(self.session.sensor_fields["level_set"], "NO")
+        self.assertEqual(self.session.encoder_fields["A"]["raw"], "4095")
+        self.assertEqual(self.session.sensor_status_at, 1)
+
 
     def test_physical_pitch_display_uses_declared_axis_not_raw_roll(self):
         self.arm()
         self.session.receive(
-            "BNO_STATE has_sample=YES accuracy=3 fresh=YES heading=301.800 "
-            "physical_pitch=-9.989 pitch_axis=PITCH pitch_roll=3.571", 2)
+            "ORIENTATION_STATE protocol=2 feedback=AS5600 level_set=YES north_set=YES has_sample=YES fresh=YES heading=301.800 "
+            "physical_pitch=-9.989 pitch_axis=PITCH roll=UNAVAILABLE", 2)
         rows = "\n".join(self.session.diagnostic_lines(2.1))
         self.assertIn("physical pitch/PITCH=-9.989 deg", rows)
         self.assertNotIn("physical pitch/ROLL=3.571 deg", rows)
-        self.assertEqual(self.session.sensor_fields["pitch_roll"], "3.571")
         self.assertEqual(self.session.frame(2.1, 0, 100), b"JOG 0 100 0\n")
 
-    def test_historical_firmware_roll_display_remains_labeled_roll(self):
-        self.session.receive("BNO_STATE heading=70 pitch_roll=8.000", 1)
-        rows = "\n".join(self.session.diagnostic_lines(1.1))
-        self.assertIn("physical pitch/ROLL=8.000 deg", rows)
+    def test_roll_is_unavailable_in_diagnostics(self):
+        self.session.receive("ORIENTATION_STATE protocol=2 feedback=AS5600 heading=70 physical_pitch=8.000", 1)
+        self.assertIn("roll=UNAVAILABLE", "\n".join(self.session.diagnostic_lines(1.1)))
+
 
 
 if __name__ == "__main__":

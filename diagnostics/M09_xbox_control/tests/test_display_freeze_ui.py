@@ -79,7 +79,7 @@ class DisplayFreezeUiTests(unittest.TestCase):
             for at, value in ((0.2, 10), (0.9, 20), (1.1, 30)):
                 if clock.now >= at and at not in telemetry_sent:
                     telemetry_sent.add(at)
-                    port.rx += (f"BNO_STATE heading={value} physical_pitch={value / 10} pitch_axis=PITCH accuracy=3 north_usable=YES\n"
+                    port.rx += (f"ORIENTATION_STATE protocol=2 feedback=AS5600 level_set=YES north_set=YES heading={value} physical_pitch={value / 10} pitch_axis=PITCH north_usable=YES\n"
                                 f"POSE_STATE carriage_steps={value * 10}\n"
                                 f"Telemetry marker {value}\n").encode()
             result = []

@@ -1,21 +1,12 @@
 // Admission and recovery for two explicit commands using the existing POSE
 // controller. No sensor I/O belongs here; only the worker's accepted feedback.
 void resetPoseAxis(Axis &axis, double target, double timingPeak);
-bool checkSensorReset();
 void safety();
-constexpr uint32_t ALIGNMENT_RECOVERY_MS = 1500;
-// Euler pitch is mathematically bounded to +/-90 degrees. Keep margin from its
-// singular endpoint while allowing LEVEL to recover the physically observed 79-80 degrees.
-constexpr double LEVEL_SENSOR_DOMAIN_LIMIT_DEG = 89.0;
-// Begin foreground braking two watchdog ticks before its independent hard stop.
-// A blocked foreground still gets the unchanged 150 ms watchdog protection.
-constexpr uint32_t ALIGNMENT_PAUSE_AGE_MS = BNO_STALE_MS - 2 * MotionWatchdog::CHECK_INTERVAL_US / 1000;
-uint32_t alignmentPauseAt = 0, alignmentStoppedAt = 0, alignmentPauseTotal = 0;
+constexpr double LEVEL_PITCH_LIMIT_DEG = 89.0;
 uint32_t alignmentDeadlineMs = LEG_TIMEOUT_MS;
-bool alignmentStopped = false, alignmentTimingKnown = false;
+bool alignmentTimingKnown = false;
 double alignmentInitialError = 0;
-double alignmentTimingAngle = 0, alignmentHeadingFirst = 0, alignmentYawReference = 0;
-double alignmentPauseHeading = 0, alignmentPauseContinuous = 0;
+double alignmentTimingAngle = 0;
 int32_t alignmentTimingSteps = 0;
 uint8_t pendingOrientation = 0; // 1=LEVEL, 2=NORTH; only during normal manual braking.
 
@@ -24,7 +15,7 @@ uint32_t alignmentSpeed(bool pitch) { return pitch ? PITCH_TRAVEL_SPEED_HZ : YAW
 int32_t alignmentAcceleration(bool pitch) { return pitch ? PITCH_TRAVEL_ACCELERATION : YAW_SLEW_ACCELERATION; }
 
 // M09 has no configured mechanical steps/degree. These values come from the
-// existing learned BNO response, not the 24/16 correction gains. Gear reduction
+// existing learned encoder response, not the 24/16 correction gains. Gear reduction
 // and driver microstepping are both included in measured motor pulses/output deg.
 double alignmentSeconds(bool pitch, double error, double pulsesPerDegree) {
     const double speed = alignmentSpeed(pitch), acceleration = alignmentAcceleration(pitch);
@@ -47,7 +38,7 @@ void alignmentDeadline(bool pitch) {
     if (!isfinite(alignmentPulsesPerDegree) || alignmentPulsesPerDegree <= 0) return;
     const double seconds = alignmentSeconds(pitch, alignmentInitialError, alignmentPulsesPerDegree);
     if (!isfinite(seconds)) return; // Real progress checks still bound uncertain estimates.
-    const double duration = ceil(2000 * seconds + 10000) + alignmentPauseTotal;
+    const double duration = ceil(2000 * seconds + 10000);
     if (duration >= 0x7fffffffUL) { abortAlignment("alignment timing estimate out of range"); return; }
     const uint32_t estimate = static_cast<uint32_t>(duration);
     if (!alignmentTimingKnown || estimate > alignmentDeadlineMs) {
@@ -62,7 +53,7 @@ void alignmentDeadline(bool pitch) {
 void updateAlignmentTiming(Axis &axis) {
     const double angle = axis.current - alignmentTimingAngle;
     const double pulses = static_cast<double>(axis.motor->getCurrentPosition()) - alignmentTimingSteps;
-    const int sign = bnoFeedbackStepSign(axis);
+    const int sign = axisFeedbackStepSign(axis);
     if (fabs(angle) < DIRECTION_RESPONSE_DEG || fabs(pulses) < 8 || pulses * angle * sign <= 0) return;
     const double estimate = fabs(pulses / angle);
     // Replan only when necessary; do not integrate thousands of hypothetical
@@ -92,61 +83,16 @@ void abortAlignment(const char *reason) {
     queueText(alignmentName()); queueText(" FAILED: "); queueText(reason); queueText("\n");
     beginPoseStop(reason);
 }
-void pauseAlignment(const char *reason) {
-    if (!alignmentActive() || poseStopping || alignmentPaused) return;
-    alignmentPaused = true; alignmentPauseAt = millis(); alignmentStopped = false;
-    alignmentPauseHeading = orientation.heading;
-    // current/first were last updated before invalidateOrientation cleared the tracker.
-    alignmentPauseContinuous = yawAxis.current;
-    if (motionWatchdog.tripped()) invalidateKeyframes("alignment feedback watchdog forced stop");
-    Axis &axis = alignmentAxis();
-    axis.finiteActive = axis.observing = false;
-    if (axis.motor->isRunning()) axis.motor->stopMove();
-    motionWatchdog.disarm();
-    settleSamples = 0; poseStoppedObserved = false;
-    queueText(alignmentName()); queueText(" PAUSED: "); queueText(reason);
-    queueText("; braking; feedback recovery grace_ms=1500\n");
-}
+
 bool alignmentSafety() {
-    if (!alignmentPaused && (!fresh(millis()) || motionWatchdog.tripped() ||
-        millis() - lastBnoGood >= ALIGNMENT_PAUSE_AGE_MS)) pauseAlignment("BNO feedback delayed or unavailable");
-    if (alignmentPaused) {
-        const uint32_t now = millis();
-        if (now - alignmentPauseAt >= ALIGNMENT_RECOVERY_MS) {
-            abortAlignment("BNO feedback did not recover within 1500 ms"); return false;
-        }
-        if (!poseMotorsStopped()) return false;
-        if (!alignmentStopped) { alignmentStopped = true; alignmentStoppedAt = now; }
-        if (!fresh(now) || !sampleAtOrAfter(lastBnoGood, alignmentStoppedAt + PRECISION_OBSERVE_MS) ||
-            !sampleAtOrAfter(lastBnoGood, alignmentPauseAt + 1)) return false;
-        if (!motionWatchdog.clearTripWhenStopped()) return false;
-        // Keep the travel reference through a sensor tracker reset, but target
-        // magnetic heading zero again in its newly received reported solution.
-        heading.first = alignmentHeadingFirst;
-        heading.continuous = alignmentPauseContinuous + shortestDifference(orientation.heading, alignmentPauseHeading);
-        heading.previous = orientation.heading; heading.initialized = true;
-        if (!referenceSet) pitchReadyYaw = alignmentYawReference;
-        resetPoseAxis(yawAxis, operation == Operation::NORTH ?
-            heading.continuous + shortestDifference(0, orientation.heading) : heading.continuous, 0);
-        resetPoseAxis(pitchAxis, operation == Operation::LEVEL ? 0 : physicalPitch(), 0);
-        if (operation == Operation::LEVEL) yawAxis.motion = Motion::HOLD;
-        else pitchAxis.motion = Motion::HOLD;
-        alignmentTimingAngle = alignmentAxis().current;
-        alignmentTimingSteps = alignmentAxis().motor->getCurrentPosition();
-        alignmentPauseTotal += now - alignmentPauseAt;
-        alignmentDeadlineMs += now - alignmentPauseAt;
-        if (!motionWatchdog.arm(lastBnoGood)) return false;
-        alignmentPaused = false; phase = Phase::MOVING;
-        lastControlSample = bnoHealth.freshSamples; recordTimingStarts();
-        char line[140];
-        snprintf(line, sizeof(line), "%s RESUMED deadline_ms=%lu\n", alignmentName(),
-            static_cast<unsigned long>(alignmentDeadlineMs)); queueText(line);
+    if (!fresh(millis()) || motionWatchdog.tripped()) {
+        abortAlignment("encoder feedback/reference lost; recalibrate before retrying"); return false;
     }
     if (millis() - controlStartedAt >= alignmentDeadlineMs) {
         abortAlignment("alignment displacement/response deadline expired"); return false;
     }
-    if (operation == Operation::LEVEL && bnoValid && fabs(physicalPitch()) >= LEVEL_SENSOR_DOMAIN_LIMIT_DEG) {
-        abortAlignment("physical pitch reached BNO Euler limit margin (+/-89 degrees)"); return false;
+    if (operation == Operation::LEVEL && fabs(physicalPitch()) >= LEVEL_PITCH_LIMIT_DEG) {
+        abortAlignment("physical pitch reached +/-89 degree guard"); return false;
     }
     return !poseStopping;
 }
@@ -155,58 +101,46 @@ void rejectOrientation(const char *command, const char *reason) {
 }
 void beginOrientation(bool level) {
     const char *name = level ? "LEVEL" : "NORTH";
-    checkSensorReset();
     if (!commandIdle() || !controlReady || !poseMotorsStopped()) {
         rejectOrientation(name, "stopped READY required; busy or abort latched"); return;
     }
-    if (!bnoInitialized || !reportEnabled) { rejectOrientation(name, "BNO unavailable or rotation report disabled"); return; }
-    if (alignmentSampleInvalid) { rejectOrientation(name, "invalid orientation sample; wait for fresh valid BNO data"); return; }
-    if (!fresh(millis())) { rejectOrientation(name, "BNO orientation unavailable or stale"); return; }
-    if (!isfinite(physicalPitch())) {
-        rejectOrientation(name, "physical pitch orientation invalid"); return;
+    if (!fresh(millis())) {
+        rejectOrientation(name, "fresh calibrated encoders required; SET_NORTH and SET_LEVEL"); return;
     }
-    if (!level) {
-        const char *reason = northUnavailableReason(millis());
-        if (strcmp(reason, "usable") != 0) {
-            char detail[150]; snprintf(detail, sizeof(detail), "magnetic heading unavailable: %s", reason);
-            rejectOrientation(name, detail); return;
-        }
+    if (level && fabs(physicalPitch()) >= LEVEL_PITCH_LIMIT_DEG) {
+        rejectOrientation(name, "physical pitch at +/-89 degree guard"); return;
     }
-    if (level && fabs(physicalPitch()) >= LEVEL_SENSOR_DOMAIN_LIMIT_DEG) {
-        rejectOrientation(name, "physical pitch at BNO Euler limit margin (+/-89 degrees)"); return;
-    }
-    if (!bnoWatchdogReady || !motionWatchdog.clearTripWhenStopped()) {
+    if (!feedbackWatchdogReady || !motionWatchdog.clearTripWhenStopped()) {
         rejectOrientation(name, "orientation watchdog unavailable"); return;
     }
     // Preserve the shortest heading move without a fixed yaw travel envelope.
     const double target = level ? heading.continuous : heading.continuous + shortestDifference(0, orientation.heading);
-    const double reference = referenceSet ? northTargetContinuous : pitchReadyYaw;
+    const double reference = northTargetContinuous;
     const double currentOffset = heading.continuous - reference;
     const double targetOffset = target - reference;
     operation = level ? Operation::LEVEL : Operation::NORTH;
-    poseActive = poseNeedsBno = true; poseStopping = alignmentPaused = false;
-    finalPrinted = false; phase = Phase::MOVING; window.active = false;
+    poseActive = poseNeedsFeedback = true; poseStopping = false;
+    finalPrinted = false; phase = Phase::MOVING;
     posePrecisionOnly = false; poseStoppedObserved = false;
     resetPoseAxis(yawAxis, level ? heading.continuous : target, 0);
     resetPoseAxis(pitchAxis, level ? 0 : physicalPitch(), 0);
-    yawRequired = !level; accuracyRequired = false; accuracyGrace = {};
+    yawRequired = !level;
     if (level) yawAxis.motion = Motion::HOLD; else pitchAxis.motion = Motion::HOLD;
     carriageTarget = carriageMotor->getCurrentPosition(); carriagePending = false;
     yawRateCap = YAW_SLEW_SPEED_HZ; pitchRateCap = PITCH_TRAVEL_SPEED_HZ;
     settleSamples = 0; sawYawMotion = sawPitchMotion = concurrentMotion = concurrentThreeMotion = false;
     plannedDurationSeconds = 0; timingLimited = false;
-    controlStartedAt = millis(); lastControlSample = bnoHealth.freshSamples;
-    alignmentPauseTotal = 0; alignmentDeadlineMs = LEG_TIMEOUT_MS; alignmentTimingKnown = false;
+    controlStartedAt = millis(); lastControlSample = feedbackGeneration;
+    alignmentDeadlineMs = LEG_TIMEOUT_MS; alignmentTimingKnown = false;
     alignmentPulsesPerDegree = level ? pitchPulsesPerDegree : yawPulsesPerDegree;
     alignmentInitialError = fabs(alignmentAxis().error);
     alignmentTimingAngle = alignmentAxis().current; alignmentTimingSteps = alignmentAxis().motor->getCurrentPosition();
-    alignmentHeadingFirst = heading.first; alignmentYawReference = reference;
     recordTimingStarts(); alignmentDeadline(level);
     if (poseStopping) return;
-    if (!motionWatchdog.arm(lastBnoGood)) { abortAlignment("orientation watchdog arm failed"); return; }
+    if (!motionWatchdog.arm(lastFeedbackAt)) { abortAlignment("orientation watchdog arm failed"); return; }
     char line[360];
     snprintf(line, sizeof(line), "%s ACCEPTED target_deg=0 reference=%s error_deg=%.3f current_offset_deg=%.3f target_offset_deg=%.3f tolerance_deg=%.3f cap_hz=%lu accel=%ld deadline_ms=%lu pulses_per_deg=%.3f\n",
-        name, level ? "GRAVITY_EULER_PITCH" : "MAGNETIC_NORTH", alignmentAxis().error,
+        name, level ? "MANUAL_LEVEL" : "MANUAL_NORTH", alignmentAxis().error,
         currentOffset, targetOffset, TOLERANCE_DEG,
         static_cast<unsigned long>(alignmentSpeed(level)), static_cast<long>(alignmentAcceleration(level)),
         static_cast<unsigned long>(alignmentDeadlineMs), alignmentPulsesPerDegree);

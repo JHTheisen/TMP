@@ -115,7 +115,7 @@ void disarmedAndInitializationFailures() {
     assert(!uninitialized.begin(fixture.yaw, fixture.pitch, 0x80000000UL));
     assert(uninitialized.begin(fixture.yaw, fixture.pitch, 150));
     assert(!uninitialized.begin(fixture.yaw, fixture.pitch, 150));
-    // Arming must preserve the actual BNO timestamp even when already stale.
+    // Arming must preserve the actual encoder timestamp even when already stale.
     assert(uninitialized.arm(1000));
     uninitialized.check(1200);
     assert(uninitialized.tripped());

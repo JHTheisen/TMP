@@ -2,7 +2,7 @@
 #include "control_math.h"
 
 namespace milestone8 {
-// Timing estimates use a response learned from BNO motion (pulses/degree),
+// Timing estimates use a response learned from encoder motion (pulses/degree),
 // never the M07 error-to-correction gains as a mechanical gearing ratio.
 // They exclude the shared final settling window and remain approximate:
 // sensor latency, backlash and changing load are handled by closed-loop control.

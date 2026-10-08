@@ -57,32 +57,22 @@ static uint32_t forceStopDrainMs = 0;
 // Independent GPIO latch fixture: intentionally not derived from motor sign.
 static uint32_t gpioOutput = 0;
 static PlantMotor motors[3];
-static bool axisInitFails = false, busBInitFails = false, bnoInitFails = false;
-static bool reportInitFails = false, bnoAckFails = false, speedFails = false, accelerationFails = false;
+static bool axisInitFails = false, busBInitFails = false;
+static bool speedFails = false, accelerationFails = false;
 static bool moveRejected = false;
 static uint8_t rejectedStepPin = 0;
-static uint32_t bnoPauseStart = 0, bnoPauseEnd = 0, bnoResetAt = 0, blockBnoMs = 0;
-static bool bnoResetDelivered = false, resetDuringPoll = false;
-static unsigned reenableFailuresRemaining = 0;
-static bool invalidQuaternion = false, wrongReportType = false;
-static uint8_t accuracy = 3;
 static double baselineYaw = 70.0, baselinePitch = 24.0;
 static double noiseAmplitude = 0, yawDisturbance = 0, pitchDisturbance = 0;
 static bool encoderPlantFeedback = false;
 static double encoderBaselineDegrees[2] = {37.0, 113.0};
-static double encoderDegreesPerStep[2] = {-0.18, -0.225};
+// Synthetic encoder travel magnitudes, independent of controller direction.
+// Encoder-backed fixtures explicitly set physicalSign from measured hardware.
+static double encoderDegreesPerStep[2] = {0.18, 0.225};
 static double encoderAxisDisturbance[2] = {};
-// Historical M08 tests retain their original roll-mounted plant. Current M09
-// fixtures opt into the powered-log mounting, where cradle pitch is BNO pitch.
-static bool physicalPitchUsesRoll = true;
-static double rawBnoPitch = -3, rawBnoPitchNoise = 0;
-static double rawBnoRoll = -3, rawBnoRollNoise = 0;
-static bool frozenFeedback = false;
-static double heldYaw = 0, heldPitch = 0;
 static int pendingSerial = -1;
 static std::string serialInput;
 static int serialWriteSpace = 128;
-static unsigned forceStops = 0, gentleStops = 0, bnoReads = 0;
+static unsigned forceStops = 0, gentleStops = 0;
 static uint32_t firstForceStopAt = 0;
 static std::vector<MoveCommand> commands;
 static std::vector<uint8_t> connectedPins, highPins, addressedSensors;

@@ -90,19 +90,14 @@ class SessionLog:
     def received(self, line, now):
         fields = dict(token.split("=", 1) for token in line.split() if "=" in token)
         prefix = line.split(" ", 1)[0]
-        if prefix in ("BNO_STATE", "BNO_RAW", "BNO_REPORT", "ENCODER_STATE", "MANUAL_STATE", "POSE_STATE", "STATE"):
+        if prefix in ("ORIENTATION_STATE", "ENCODER_STATE", "MANUAL_STATE", "POSE_STATE", "STATE"):
             signature = tuple(fields.get(key) for key in (
-                "available", "valid", "has_sample", "fresh", "accuracy", "raw_status", "accepted",
-                "reason", "euler_valid", "diagnostic_quality", "report_id", "north_usable", "status", "magnet_good", "active"))
+                "available", "valid", "has_sample", "fresh", "north_set", "level_set",
+                "status", "magnet_good", "active", "protocol"))
             self.sampled((prefix, fields.get("bus")), "RX", line,
              now, 5.0, signature)
         elif line in ("M09 READY", "M09 MANUAL", "M09 BUSY", "M09 ABORTED"):
             self.sampled("firmware_mode", "RX", line, now, 5.0, line)
-        elif prefix == "BNO_IO":
-            self.sampled("bno_io", "RX", line, now, 10.0)    
-        elif prefix == "BNO_TRACE":
-             trace_kind = fields.get("kind", "UNKNOWN")
-             self.sampled(("bno_trace", trace_kind), "RX", line, now, 5.0)    
         else:
             self.event("RX", line)
 

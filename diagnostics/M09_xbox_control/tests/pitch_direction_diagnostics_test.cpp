@@ -27,7 +27,6 @@ bool recordHas(const std::string &key, const std::string &field) {
 }
 }
 int main() {
-    simulated::physicalPitchUsesRoll=false;
     simulated::independentTick=tick;
     setup(); advance(100); command("JOG 0 0 0");
     assert(manualActive);
