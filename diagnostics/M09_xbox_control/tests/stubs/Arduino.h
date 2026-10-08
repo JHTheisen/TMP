@@ -71,6 +71,7 @@ static double noiseAmplitude = 0, yawDisturbance = 0, pitchDisturbance = 0;
 static bool encoderPlantFeedback = false;
 static double encoderBaselineDegrees[2] = {37.0, 113.0};
 static double encoderDegreesPerStep[2] = {-0.18, -0.225};
+static double encoderAxisDisturbance[2] = {};
 // Historical M08 tests retain their original roll-mounted plant. Current M09
 // fixtures opt into the powered-log mounting, where cradle pitch is BNO pitch.
 static bool physicalPitchUsesRoll = true;

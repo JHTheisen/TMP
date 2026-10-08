@@ -27,6 +27,10 @@ void advance(uint32_t duration) {
     }
 }
 void begin() {
+    // Fixture represents previously measured, stopped encoder/step geometry.
+    // Separate primary-feedback tests exercise learning and missing scales.
+    celestialLearnedEncoderScale[0] = (360.0/4096) / (0.18 * YAW_TRACK_PULSES_PER_DEG);
+    celestialLearnedEncoderScale[1] = (360.0/4096) / (0.225 * PITCH_TRACK_PULSES_PER_DEG);
     yawTarget = orientation.heading; pitchTarget = physicalPitch();
     updateAt = millis(); sequence = 0;
     beginCelestial(71, yawTarget, pitchTarget);
@@ -132,10 +136,10 @@ int main(int argc, char **argv) {
         }
         if (scenario == "brake_stuck") simulated::motors[0].neverStops = true;
         if (scenario == "sensor_pause") {
-            simulated::wrongReportType = true;
+            Wire.encoder.requestLength = 2;
             advance(4000); active();
             CHECK(celestialEncoderPaused && yawAxis.motion == Motion::BRAKING);
-            simulated::wrongReportType = false;
+            Wire.encoder.requestLength = 3;
             advance(100000); active(); CHECK(!celestialEncoderPaused);
         } else if (scenario == "zero" || scenario == "below_minimum") {
             rate(scenario == "below_minimum" ? 0.004 : 0);

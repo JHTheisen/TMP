@@ -26,7 +26,7 @@ constexpr uint32_t CELESTIAL_TRACK_PROGRESS_MS = 60000;
 constexpr uint32_t CELESTIAL_MIN_RATE_MILLIHZ = 5; // ESP32 FAS 16 MHz / uint32 tick interval
 struct CelestialTrackAxis {
     double conversion = 0, filteredError = 0, correction = 0;
-    double progressError = 0;
+    double progressPosition = 0, commandedTravel = 0;
     uint32_t servicedAt = 0, progressAt = 0, rateMilliHz = 0;
     uint32_t brakeTimeoutMs = BRAKING_TIMEOUT_MS, launchAt = 0;
     bool started = false;
@@ -41,13 +41,12 @@ void celestialRateTelemetry();
 
 // A celestial session starts in the established BNO frame.  While that sensor
 // is trustworthy, movement teaches the signed conversion from each wrapped
-// AS5600 to its corresponding cradle axis (Bus A yaw, Bus B pitch).  The first
-// BNO fault latches onto the encoder frame only when BOTH scales are ready.
-// Otherwise a stopped pause can resume on fresh, accurate BNO data.
+// AS5600 to its corresponding cradle axis (Bus A yaw, Bus B pitch). Acquisition
+// can use BNO; TRACK always latches the encoder frame, never BNO fast feedback.
 constexpr uint32_t CELESTIAL_ENCODER_STALE_MS = 150;
 constexpr double CELESTIAL_ENCODER_TICK_DEG = 360.0 / 4096.0;
 struct CelestialEncoderAxis {
-    bool initialized = false, scaleKnown = false;
+    bool initialized = false, scaleKnown = false, calibrationAnchored = false;
     uint16_t raw = 0;
     int64_t ticks = 0, referenceTicks = 0, calibrationTicks = 0;
     int32_t calibrationSteps = 0;
@@ -56,6 +55,8 @@ struct CelestialEncoderAxis {
     double degreesPerTick = 0, bestCalibrationTravel = 0;
 };
 CelestialEncoderAxis celestialEncoderAxes[2];
+double celestialLearnedEncoderScale[2] = {};
+uint32_t celestialCalibrationStoppedAt = 0;
 bool celestialEncoderMode = false, celestialEncoderPaused = false;
 bool celestialBnoHealthy = true, celestialBnoRecoveryReported = false;
 uint32_t celestialEncoderGeneration = 0, celestialEncoderServicedGeneration = 0;
@@ -71,9 +72,11 @@ int celestialEncoderDelta(uint16_t current, uint16_t previous) {
 bool observeCelestialEncoder(unsigned index) {
     const auto &sample = encoders.state(index);
     auto &axis = celestialEncoderAxes[index];
-    if (!sample.hasSample || !sample.valid) return false;
+    if (!sample.hasSample || !sample.valid || !sample.magnetGood()) return false;
     if (!axis.initialized) {
         axis.initialized = true; axis.raw = sample.raw; axis.lastGoodMs = sample.lastGoodMs;
+        axis.calibrationSteps = (index ? pitchMotor : yawMotor)->getCurrentPosition();
+        axis.calibrationTicks = axis.ticks;
         ++celestialEncoderGeneration;
         return true;
     }
@@ -86,11 +89,51 @@ bool observeCelestialEncoder(unsigned index) {
 bool celestialEncoderAxisReady(unsigned index, uint32_t now) {
     const auto &state = encoders.state(index);
     const auto &axis = celestialEncoderAxes[index];
-    return axis.initialized && axis.scaleKnown && state.valid && state.hasSample &&
+    return axis.initialized && axis.scaleKnown && state.valid && state.hasSample && state.magnetGood() &&
         state.ageMs(now) < CELESTIAL_ENCODER_STALE_MS;
 }
 bool celestialEncoderFeedbackAvailable(uint32_t now) {
     return celestialEncoderAxisReady(0, now) && celestialEncoderAxisReady(1, now);
+}
+void learnStoppedCelestialEncoderScales() {
+    if (!yawMotor || !pitchMotor) return;
+    const uint32_t now = millis();
+    for (unsigned index = 0; index < 2; ++index) {
+        const auto &sample = encoders.state(index);
+        auto &axis = celestialEncoderAxes[index];
+        if (!sample.valid || !sample.magnetGood() ||
+            now - axis.lastGoodMs >= CELESTIAL_ENCODER_STALE_MS) axis.calibrationAnchored = false;
+    }
+    observeCelestialEncoder(0); observeCelestialEncoder(1);
+    if (celestialActive()) return; // Never change a tracking frame or scale.
+    if (!poseMotorsStopped()) { celestialCalibrationStoppedAt = now; return; }
+    if (now - celestialCalibrationStoppedAt < CELESTIAL_ENCODER_STALE_MS) return;
+    // Learn shaft-to-axis geometry from ordinary, completed motor movement.
+    // The existing powered STEP/cradle-degree calibration and signs stay fixed.
+    // Two stopped endpoints avoid pairing a delayed encoder sample with a
+    // moving motor count. No calibration move is commanded here.
+    for (unsigned index = 0; index < 2; ++index) {
+        auto &encoder = celestialEncoderAxes[index];
+        const auto &sample = encoders.state(index);
+        if (!encoder.initialized || !sample.valid || !sample.magnetGood() ||
+                sample.ageMs(now) >= CELESTIAL_ENCODER_STALE_MS) continue;
+        Axis &axis = index ? pitchAxis : yawAxis;
+        if (!encoder.calibrationAnchored) {
+            encoder.calibrationSteps = axis.motor->getCurrentPosition();
+            encoder.calibrationTicks = encoder.ticks;
+            encoder.calibrationAnchored = true;
+            continue;
+        }
+        if (celestialLearnedEncoderScale[index] != 0) continue;
+        const double steps = static_cast<double>(axis.motor->getCurrentPosition()) - encoder.calibrationSteps;
+        const double ticks = static_cast<double>(encoder.ticks - encoder.calibrationTicks);
+        if (fabs(steps) < 32 || fabs(ticks) < 16 || fabs(ticks) <= encoder.bestCalibrationTravel) continue;
+        const double scale = steps * bnoFeedbackStepSign(axis) /
+            ((index ? PITCH_TRACK_PULSES_PER_DEG : YAW_TRACK_PULSES_PER_DEG) * ticks);
+        if (!isfinite(scale) || fabs(scale) < 1e-6 || fabs(scale) > 1.0) continue;
+        celestialLearnedEncoderScale[index] = scale;
+        encoder.bestCalibrationTravel = fabs(ticks);
+    }
 }
 void initializeCelestialEncoders() {
     celestialEncoderAxes[0] = {}; celestialEncoderAxes[1] = {};
@@ -103,6 +146,9 @@ void initializeCelestialEncoders() {
         axis.referenceTicks = axis.calibrationTicks = axis.ticks;
         axis.referenceAngle = axis.calibrationAngle = angles[index];
         axis.calibrationSteps = motors[index]->getCurrentPosition();
+        axis.calibrationAnchored = true; // GOTO admission requires stopped motors.
+        axis.degreesPerTick = celestialLearnedEncoderScale[index];
+        axis.scaleKnown = axis.degreesPerTick != 0;
     }
     celestialEncoderMode = celestialEncoderPaused = false;
     celestialBnoHealthy = true; celestialBnoRecoveryReported = false;
@@ -111,7 +157,7 @@ void initializeCelestialEncoders() {
 }
 void updateCelestialEncoderCalibration(unsigned index, double bnoAngle) {
     auto &encoder = celestialEncoderAxes[index];
-    if (!encoder.initialized) return;
+    if (!encoder.initialized || celestialLearnedEncoderScale[index] != 0) return;
     const double tickTravel = static_cast<double>(encoder.ticks - encoder.calibrationTicks);
     const double encoderTravel = fabs(tickTravel * CELESTIAL_ENCODER_TICK_DEG);
     const double bnoTravel = bnoAngle - encoder.calibrationAngle;
@@ -273,8 +319,8 @@ void celestialRecordBnoRecovery(const EulerAngles &sample, uint8_t accuracy, uin
     bnoHealth.recordFresh(sampleAt, false);
     orientation = sample; bnoAccuracy = accuracy; bnoValid = true; lastBnoGood = sampleAt;
     alignmentSampleInvalid = false;
-    uint32_t ignoredAt = 0; bool ignoredNew = false;
-    serviceCelestialEncoderFeedback(millis(), ignoredAt, ignoredNew);
+    // Reference diagnostics only: do not consume the encoder control generation
+    // here, or healthy BNO reports can starve the encoder-driven servo.
     celestialRecoveryYawDiscrepancy = shortestDifference(sample.heading,
         wrap360(heading.first + yawAxis.current));
     celestialRecoveryPitchDiscrepancy = physicalPitch(sample) - pitchAxis.current;
@@ -391,10 +437,9 @@ void celestialSafety() {
     if (now - celestialUpdatedAt >= CELESTIAL_LEASE_MS) {
         stopCelestial("target update lease expired after 3000 ms"); return;
     }
-    if (!celestialEncoderMode &&
-        (!fresh(now) || now - lastBnoGood >= ALIGNMENT_PAUSE_AGE_MS || alignmentSampleInvalid))
+    if (!fresh(now) || now - lastBnoGood >= ALIGNMENT_PAUSE_AGE_MS || alignmentSampleInvalid)
         celestialBnoUnavailable("BNO orientation stale or invalid");
-    if (!celestialEncoderMode && bnoAccuracy < BNO_MIN_ACCURACY)
+    if (bnoAccuracy < BNO_MIN_ACCURACY)
         celestialBnoUnavailable("BNO accuracy below 2");
     const bool feedbackAvailable = celestialControlFeedbackReady();
     if (!celestialTracking && feedbackAvailable && now - controlStartedAt >= celestialDeadlineMs) {
@@ -412,6 +457,20 @@ void enterCelestialTracking() {
     celestialTrackAxes[0].conversion = YAW_TRACK_PULSES_PER_DEG;
     celestialTrackAxes[1].conversion = PITCH_TRACK_PULSES_PER_DEG;
     celestialTracking = true;
+    // Freeze the acquired BNO reference and scale; all subsequent yaw/pitch
+    // position, residual, direction and response checks use AS5600 samples.
+    celestialEncoderMode = true;
+    celestialEncoderServicedGeneration = celestialEncoderGeneration - 1;
+    for (unsigned index = 0; index < 2; ++index) {
+        if (celestialEncoderAxes[index].scaleKnown)
+            celestialLearnedEncoderScale[index] = celestialEncoderAxes[index].degreesPerTick;
+    }
+    if (!celestialEncoderFeedbackAvailable(millis())) {
+        queueText("CELESTIAL_TRACK encoder reference/scale unavailable; HOLD until qualified AS5600 feedback; if uncalibrated, STOP and move both axes manually before retrying\n");
+        holdCelestialForEncoder(millis());
+    }
+    // Acquisition settled at a finite target; continuous TRACK never completes.
+    yawAxis.settled = pitchAxis.settled = false;
     yawAxis.slewFinished = pitchAxis.slewFinished = true;
     phase = Phase::MOVING;
     char line[140];
@@ -547,9 +606,8 @@ void serviceCelestialTrackAxis(Axis &axis, uint32_t now, uint32_t sampleAt) {
         }
         if (!sampleAtOrAfter(sampleAt, axis.stoppedAt + PRECISION_OBSERVE_MS)) return;
         axis.observing = false;
-        // No progress is expected during an intentional long brake. Give the
-        // resumed servo its normal progress window, without changing its filter.
-        track.progressAt = now; track.progressError = fabs(track.filteredError);
+        // No motion response is expected during an intentional long brake.
+        track.progressAt = now; track.progressPosition = axis.current; track.commandedTravel = 0;
         setMotion(axis, Motion::HOLD);
         return;
     }
@@ -599,14 +657,18 @@ void serviceCelestialTrackAxis(Axis &axis, uint32_t now, uint32_t sampleAt) {
     // an unrepresentable rate as zero; never clamp UP and overdrive an axis.
     const uint32_t milliHz = requested >= CELESTIAL_MIN_RATE_MILLIHZ ?
         static_cast<uint32_t>(lround(requested)) : 0;
-    // Progress is expected only when motion is requested. Continue evaluating
-    // the unchanged residual filter in ZERO so a new nonzero demand can resume.
-    const double error = fabs(track.filteredError);
-    if (!milliHz || axis.motion == Motion::TRACK_ZERO || !track.started ||
-            error <= TOLERANCE_DEG || error < track.progressError - 0.1) {
-        track.progressAt = now; track.progressError = error;
-    } else if (now - track.progressAt >= CELESTIAL_TRACK_PROGRESS_MS) {
-        stopCelestial("TRACK filtered position error made no progress for 60000 ms"); return;
+    // A moving target need not have shrinking residual error. Detect absent
+    // measured motion instead, after enough commanded travel to distinguish it
+    // from sensor resolution and legitimate sub-hertz step pauses. Keep the
+    // residual filter/correction and telemetry independent of this stall check.
+    if (!milliHz || axis.motion != Motion::TRACK || !track.started ||
+            (axis.current - track.progressPosition) * bnoFeedbackStepSign(axis) * axis.slewDirection >= 0.1) {
+        track.progressAt = now; track.progressPosition = axis.current; track.commandedTravel = 0;
+    } else {
+        track.commandedTravel += (track.rateMilliHz / 1000.0 / track.conversion) * seconds;
+        if (track.commandedTravel >= 0.2 && now - track.progressAt >= CELESTIAL_TRACK_PROGRESS_MS) {
+            stopCelestial("TRACK commanded motion has no measured response for 60000 ms"); return;
+        }
     }
     track.started = true;
     if (!milliHz) {

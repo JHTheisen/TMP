@@ -6,13 +6,22 @@ namespace simulated {
 static unsigned productQueries = 0, bnoBeginCalls = 0, sh2CloseCalls = 0;
 static int productQueryResult = 0, reinitAccuracy = -1;
 static bool reinitInitFails = false;
+static unsigned bnoInitialFailuresRemaining = 0, bnoSessionLeaks = 0;
+static uint32_t bnoInitDelayMs = 0;
+static bool sh2SessionOpen = false, bnoEarlyInitFails = false;
+static uint8_t lastBnoAddress = 0;
+static TwoWire *lastBnoWire = nullptr;
+static std::vector<uint32_t> bnoBeginTimes;
 }
 extern "C" inline int m09_sh2_request_product_id() {
     ++simulated::productQueries;
     return simulated::productQueryResult;
 }
-inline void sh2_close() { ++simulated::sh2CloseCalls; }
-struct sh2_Hal_t { int (*write)(sh2_Hal_t *, uint8_t *, unsigned); };
+inline void sh2_close() { ++simulated::sh2CloseCalls; simulated::sh2SessionOpen = false; }
+struct sh2_Hal_t {
+    int (*write)(sh2_Hal_t *, uint8_t *, unsigned);
+    int (*read)(sh2_Hal_t *, uint8_t *, unsigned, uint32_t *);
+};
 struct sh2_RotationVectorWAcc_t { float real, i, j, k, accuracy; };
 struct sh2_SensorValue_t {
     uint8_t sensorId = 0;
@@ -29,11 +38,21 @@ public:
     bool begin_I2C(uint8_t selectedAddress, TwoWire *selectedWire)
     {
         ++simulated::bnoBeginCalls;
+        simulated::bnoBeginTimes.push_back(millis());
+        simulated::lastBnoAddress = selectedAddress;
+        simulated::lastBnoWire = selectedWire;
         address = selectedAddress;
         wire = selectedWire;
+        simulated::sensorDelay(simulated::bnoInitDelayMs);
+        if (simulated::bnoEarlyInitFails) return false;
+        if (simulated::sh2SessionOpen) ++simulated::bnoSessionLeaks;
+        simulated::sh2SessionOpen = true;
         _HAL.write = simulatedWrite;
         if (simulated::bnoBeginCalls > 1 && simulated::reinitAccuracy >= 0)
             simulated::accuracy = static_cast<uint8_t>(simulated::reinitAccuracy);
+        if (simulated::bnoInitialFailuresRemaining) {
+            --simulated::bnoInitialFailuresRemaining; return false;
+        }
         return !simulated::bnoInitFails && !(simulated::reinitInitFails && simulated::bnoBeginCalls > 1) && _init(0);
     }
     bool enableReport(uint8_t, uint32_t intervalUs)
@@ -103,7 +122,7 @@ public:
     }
 protected:
     virtual bool _init(int32_t) { return true; }
-    sh2_Hal_t _HAL = {nullptr};
+    sh2_Hal_t _HAL = {nullptr, nullptr};
 private:
     static int simulatedWrite(sh2_Hal_t *, uint8_t *, unsigned length)
     {

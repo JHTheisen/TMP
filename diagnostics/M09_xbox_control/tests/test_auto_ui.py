@@ -98,6 +98,9 @@ class AutoUiTests(unittest.TestCase):
                     self.rx += b"M09 READY\n"
                 elif words[0] == "STATUS":
                     self.rx += f"M09 {self.mode}\n".encode()
+                elif words[0] == "X":
+                    self.mode, self.completion = "ABORTED", None
+                    self.rx += b"M09 ABORTED\n"
                 elif words[0] == "SNAP" and snapshots:
                     self.rx += (f"KEYFRAME_SNAPSHOT id={words[1]} epoch=42 yaw_steps={self.positions[0]} "
                                 f"pitch_steps={self.positions[1]} carriage_steps={self.positions[2]} "
@@ -257,6 +260,63 @@ class AutoUiTests(unittest.TestCase):
                 self.assertFalse(any(data.startswith((b"KEYMOVE", b"KEYRETURN")) for _, data in writes))
                 self.assertEqual(len([data for _, data in writes if data.startswith(b"SNAP")]), 2)
                 self.assertTrue(any(at >= 1.8 and data.strip() in (b"STOP", b"X") for at, data in writes))
+
+    def test_b_tap_and_release_cancel_exit_but_preserve_immediate_abort(self):
+        for release_at in (.82, 2.6):
+            result, writes, _, _, frames, log = self.run_ui(
+                [(.8, [button(1)]), (release_at, [button(1, True)])], until=3.2)
+            self.assertEqual(result, 0)
+            self.assertGreater(frames[-1][0], 3)
+            self.assertTrue(any(.8 <= at < .85 and data == b"X\n" for at, data in writes))
+            self.assertFalse(any(at >= .8 and data.startswith(b"JOG ") for at, data in writes))
+            self.assertIn("pending application exit canceled", log)
+            self.assertNotIn("B held for 2 seconds; exiting", log)
+
+    def test_b_continuous_hold_exits_at_two_seconds(self):
+        result, writes, _, _, frames, log = self.run_ui([(.8, [button(1)])], until=4)
+        self.assertEqual(result, 0)
+        self.assertGreaterEqual(writes[-1][0], 2.8)
+        self.assertLess(writes[-1][0], 2.85)
+        self.assertLess(frames[-1][0], 2.85)
+        self.assertIn("B held for 2 seconds; exiting application", log)
+
+    def test_photo_editor_runs_waypoints_and_logs_camera_events(self):
+        dashboard_type = xbox_control.OperatorDashboard
+        def create_dashboard(*args, **kwargs):
+            dashboard = dashboard_type(*args, **kwargs)
+            dashboard.show_photo = True
+            dashboard.focused_field = "photo_segments"
+            dashboard.photo_segments.value = "3"
+            dashboard.photo_settle.value = "0.15"
+            dashboard.photo_post.value = "0.1"
+            return dashboard
+        with mock.patch.object(xbox_control, "OperatorDashboard", side_effect=create_dashboard):
+            result, writes, _, auto, _, log = self.run_ui([
+                (.8, tap(4)), (1.0, lambda port: setattr(port, "positions", (181, -283, 341))),
+                (1.1, tap(5)), (1.8, [key(pygame.K_RETURN)])], until=5)
+        self.assertEqual(result, 0)
+        waypoints = [tuple(map(int, data.split()[3:6])) for _, data in writes if data.startswith(b"KEYMOVE ")]
+        self.assertEqual(waypoints, [(127, -228, 314), (154, -255, 327), (181, -283, 341)])
+        self.assertEqual(log.count("CAMERA_TRIGGER segment="), 3)
+        self.assertIn("hook=EVENT_ONLY", log)
+        self.assertIsNone(auto.stepped)
+
+    def test_joystick_takeover_cancels_photo_settle_before_exposure(self):
+        dashboard_type = xbox_control.OperatorDashboard
+        def create_dashboard(*args, **kwargs):
+            dashboard = dashboard_type(*args, **kwargs)
+            dashboard.show_photo = True
+            dashboard.focused_field = "photo_segments"
+            dashboard.photo_settle.value = "10"
+            return dashboard
+        with mock.patch.object(xbox_control, "OperatorDashboard", side_effect=create_dashboard):
+            _, writes, _, auto, _, log = self.run_ui([
+                (.8, tap(4)), (1.1, tap(5)), (1.8, [key(pygame.K_RETURN)]),
+                (2.5, lambda port: port.axes.__setitem__(0, .8))], until=3.4)
+        self.assertNotIn("CAMERA_TRIGGER", log)
+        self.assertEqual(sum(data.startswith(b"KEYMOVE ") for _, data in writes), 1)
+        self.assertTrue(any(at >= 2.5 and data.startswith(b"JOG ") for at, data in writes))
+        self.assertIsNone(auto.stepped)
 
     def test_focus_changes_do_not_interrupt_keyframe_playback(self):
         actions = [(.8, tap(4)), (1.1, tap(5)), (1.8, tap(10))]

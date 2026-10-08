@@ -1,6 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include <Adafruit_BNO08x.h>
+#include "bno_packet_reader.h"
 
 // Copied from physically verified Milestone 3; no edits to that project.
 namespace milestone4 {
@@ -15,16 +16,25 @@ class DiagnosticBno085 : public Adafruit_BNO08x {
 public:
     DiagnosticBno085() : Adafruit_BNO08x(-1) {}
     static uint32_t writeFailures;
+    bool begin_I2C(uint8_t address, TwoWire *wire) {
+        if (!packetReader.begin(wire, address)) return false;
+        return Adafruit_BNO08x::begin_I2C(address, wire);
+    }
 
 protected:
     bool _init(int32_t sensorId) override
     {
         originalWrite = _HAL.write;
         _HAL.write = checkedWrite;
+        _HAL.read = readPacket;
         return Adafruit_BNO08x::_init(sensorId);
     }
 
 private:
+    static BnoPacketReader packetReader;
+    static int readPacket(sh2_Hal_t *, uint8_t *buffer, unsigned length, uint32_t *timestamp) {
+        return packetReader.read(buffer, length, timestamp);
+    }
     static int (*originalWrite)(sh2_Hal_t *, uint8_t *, unsigned);
     static int checkedWrite(sh2_Hal_t *hal, uint8_t *buffer, unsigned length)
     {
@@ -39,6 +49,7 @@ private:
 };
 
 uint32_t DiagnosticBno085::writeFailures = 0;
+BnoPacketReader DiagnosticBno085::packetReader;
 int (*DiagnosticBno085::originalWrite)(sh2_Hal_t *, uint8_t *, unsigned) = nullptr;
 bool quaternionToEuler(const sh2_RotationVectorWAcc_t &rotation, EulerAngles &angles)
 {

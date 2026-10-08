@@ -71,6 +71,14 @@ int main(int argc, char **argv) {
     if (scenario == "missing") simulated::bnoInitFails = true;
     if (scenario == "low_admission") simulated::accuracy = 1;
     setup();
+    // Known encoder geometry from prior stopped manual calibration.
+    celestialLearnedEncoderScale[0] = (360.0/4096) / (0.18 * YAW_TRACK_PULSES_PER_DEG);
+    celestialLearnedEncoderScale[1] = (360.0/4096) / (0.225 * PITCH_TRACK_PULSES_PER_DEG);
+    if (scenario == "stale" || scenario == "accuracy" || scenario == "reset" ||
+        scenario == "goto_unscaled_stale") {
+        // These acquisition tests intentionally have no prior encoder scale.
+        celestialLearnedEncoderScale[0] = celestialLearnedEncoderScale[1] = 0;
+    }
     simulated::motors[0].degreesPerStep = 1.0 / YAW_TRACK_PULSES_PER_DEG;
     simulated::motors[1].degreesPerStep = 1.0 / PITCH_TRACK_PULSES_PER_DEG;
     advance(scenario == "goto_unqualified" ? 50 : 2200);
@@ -156,7 +164,7 @@ int main(int argc, char **argv) {
             const double initialYaw = simulated::actualYaw();
             const size_t commandsBefore = simulated::commands.size();
             const size_t outputBefore = Serial.output.size();
-            if (residualOnly) simulated::pitchDisturbance = -angularSign * 0.3;
+            if (residualOnly) simulated::encoderAxisDisturbance[1] = -angularSign * 0.3;
             for (unsigned second = 0; second < 30; ++second) {
                 targetYaw += 0.003;
                 if (!residualOnly) targetPitch += angularSign * 0.003;
@@ -223,7 +231,7 @@ int main(int argc, char **argv) {
                 CHECK(Serial.output.find("commanded_hz=-0.156000") != std::string::npos);
             }
             if (scenario == "track_rate_residual") {
-                simulated::yawDisturbance = -0.3;
+                simulated::encoderAxisDisturbance[0] = -0.3;
                 for (unsigned second = 0; second < 15; ++second) {
                     targetYaw += 0.003; targetPitch -= 0.0024;
                     advance(1000); preserved();
@@ -255,9 +263,11 @@ int main(int argc, char **argv) {
                 celestialEncoderAxes[1].scaleKnown = false;
                 // Do not let a new BNO sample relearn it before the outage.
                 simulated::wrongReportType = true; advance(500);
-                CHECK(!celestialEncoderMode && celestialEncoderPaused && poseMotorsStopped());
+                CHECK(celestialEncoderMode && celestialEncoderPaused && poseMotorsStopped());
                 simulated::wrongReportType = false; advance(500);
-                preserved(); CHECK(!celestialEncoderMode && !celestialEncoderPaused);
+                preserved(); CHECK(celestialEncoderMode && celestialEncoderPaused);
+                celestialEncoderAxes[1].scaleKnown = true; advance(500);
+                CHECK(!celestialEncoderPaused);
                 CHECK(yawAxis.motion == Motion::TRACK && pitchAxis.motion == Motion::TRACK);
                 command("STOP"); recover();
             } else if (scenario == "track_rate_fallback") {
@@ -276,15 +286,18 @@ int main(int argc, char **argv) {
                 for (size_t n = before; n < simulated::commands.size(); ++n)
                     CHECK(!simulated::commands[n].wasBraking);
                 command("STOP"); recover();
-            } else if (scenario == "track_rate_stall") {
-                simulated::motors[0].frozen = true;
+            } else if (scenario == "track_rate_stall" || scenario == "track_rate_stall_pitch" ||
+                    scenario == "track_rate_wrong_direction") {
+                const unsigned stalledAxis = scenario == "track_rate_stall" ? 0 : 1;
+                if (scenario == "track_rate_wrong_direction") simulated::motors[stalledAxis].physicalSign *= -1;
+                else simulated::motors[stalledAxis].frozen = true;
                 for (unsigned second = 0; second < 240 && celestialActive() && !poseStopping; ++second) {
                     targetYaw += 0.01; targetPitch -= 0.0024;
                     advance(1000);
                 }
                 CHECK(poseStopping || commandIdle());
-                CHECK(Serial.output.find("TRACK filtered position error made no progress") != std::string::npos);
-                simulated::motors[0].frozen = false; recover();
+                CHECK(Serial.output.find("TRACK commanded motion has no measured response") != std::string::npos);
+                simulated::motors[stalledAxis].frozen = false; recover();
             } else if (scenario == "track_rate_rejected") {
                 simulated::speedFails = true;
                 targetYaw += 0.1; advance(1500);
@@ -297,12 +310,57 @@ int main(int argc, char **argv) {
             CHECK(yawPulsesPerDegree == 0 && pitchPulsesPerDegree == 0);
             command("STATUS"); CHECK(celestialActive());
             command("JOG 0 0 0"); CHECK(celestialActive() && !manualActive);
-            track(); CHECK(concurrentMotion && yawAxis.settled && pitchAxis.settled);
+            track(); CHECK(concurrentMotion && !yawAxis.settled && !pitchAxis.settled);
             if (scenario == "high_reduction") {
                 CHECK(celestialTimingKnown && celestialPulsesPerDegree[0] > 300 && celestialPulsesPerDegree[1] > 900);
                 CHECK(celestialDeadlineMs > LEG_TIMEOUT_MS);
             }
             command("STOP"); recover();
+        } else if (scenario == "track_persistent_error" || scenario == "track_large_error") {
+            const double residual = scenario == "track_large_error" ? 22.392 : 1.2;
+            const uint32_t startedAt = millis();
+            const int32_t initialYawSteps = yawMotor->getCurrentPosition();
+            const int32_t initialPitchSteps = pitchMotor->getCurrentPosition();
+            // Move the measured plant with the trajectory, retaining a steady
+            // lag despite executing motors. Convergence is deliberately absent.
+            const bool large = scenario == "track_large_error";
+            for (unsigned second = 0; second < (large ? 260U : 130U); ++second) {
+                // Establish a large lag with forward physical travel while
+                // the target advances faster. Do not teleport a multi-turn
+                // encoder backward (which correctly trips response protection).
+                const double lag = large ? fmin(residual, (second + 1) * .2) : residual;
+                targetYaw += large && lag < residual ? .25 : .02;
+                targetPitch += 0.02;
+                simulated::yawDisturbance = targetYaw - simulated::baselineYaw - simulated::motors[0].degrees - lag;
+                simulated::pitchDisturbance = targetPitch - simulated::baselinePitch - simulated::motors[1].degrees - 0.15;
+                simulated::encoderAxisDisturbance[0] = simulated::yawDisturbance;
+                simulated::encoderAxisDisturbance[1] = simulated::pitchDisturbance;
+                advance(1000); preserved();
+                CHECK(fresh(millis()) && bnoAccuracy >= BNO_MIN_ACCURACY);
+                CHECK(millis() - celestialUpdatedAt < 3000);
+                if (second > (large ? 135U : 15U)) {
+                    CHECK(yawAxis.motion == Motion::TRACK && pitchAxis.motion == Motion::TRACK);
+                    CHECK(yawMotor->isRunning() && pitchMotor->isRunning());
+                    CHECK(fabs(yawAxis.error) > residual - 0.1);
+                    CHECK(fabs(pitchAxis.error) > 0.1 && fabs(pitchAxis.error) < 0.2);
+                    CHECK(fabs(celestialTrackAxes[0].filteredError) > 0.5);
+                }
+                CHECK(!yawAxis.settled && !pitchAxis.settled);
+            }
+            CHECK(millis() - startedAt > 120000);
+            CHECK(yawMotor->getCurrentPosition() != initialYawSteps && pitchMotor->getCurrentPosition() != initialPitchSteps);
+            CHECK(Serial.output.find("CELESTIAL_RATE id=71 axis=YAW") != std::string::npos);
+            update(); advance(25); preserved(); // The same session still accepts updates.
+            command("STOP"); recover();
+            CHECK(Serial.output.find("YAW settled=NO") != std::string::npos);
+            CHECK(Serial.output.find("Both axes reached and settled=YES") == std::string::npos);
+        } else if (scenario == "track_lease_boundary") {
+            static_assert(CELESTIAL_LEASE_MS == 3000, "Celestial lease must remain 3000 ms");
+            heartbeat = false;
+            advance(2990 - (millis() - celestialUpdatedAt)); preserved();
+            advance(20); CHECK(poseStopping || commandIdle());
+            CHECK(std::string(celestialStopReason) == "target update lease expired after 3000 ms");
+            recover();
         } else if (scenario == "tracking") {
             const size_t startCommands = simulated::commands.size();
             // Five minutes of ordinary sky-rate drift on both axes. This must
@@ -436,13 +494,15 @@ int main(int argc, char **argv) {
             CHECK(Serial.output.find("action=REPORT_ONLY") != std::string::npos);
             command("STOP"); recover();
         } else if (scenario == "track_unscaled_recovery") {
-            CHECK(!celestialEncoderAxes[0].scaleKnown || !celestialEncoderAxes[1].scaleKnown);
+            celestialEncoderAxes[0].scaleKnown = false;
             simulated::bnoPauseStart = millis(); simulated::bnoPauseEnd = millis() + 600;
             advance(300); preserved();
-            CHECK(!celestialEncoderMode && celestialEncoderPaused && poseMotorsStopped());
+            CHECK(celestialEncoderMode && celestialEncoderPaused && poseMotorsStopped());
             advance(600); preserved();
-            CHECK(!celestialEncoderMode && !celestialEncoderPaused && celestialControlFeedbackReady());
-            CHECK(Serial.output.find("status=RECOVERED action=RESUME feedback=BNO") != std::string::npos);
+            CHECK(celestialEncoderMode && celestialEncoderPaused && !celestialControlFeedbackReady());
+            CHECK(Serial.output.find("action=REPORT_ONLY") != std::string::npos);
+            celestialEncoderAxes[0].scaleKnown = true;
+            advance(500); CHECK(!celestialEncoderPaused);
             const size_t outputBefore = Serial.output.size();
             const size_t commandsBefore = simulated::commands.size();
             targetYaw += 0.6;
@@ -450,7 +510,7 @@ int main(int argc, char **argv) {
             while (celestialActive() && simulated::commands.size() == commandsBefore &&
                     millis() < correctionDeadline) advance(50);
             preserved();
-            CHECK(celestialTracking && !celestialEncoderMode);
+            CHECK(celestialTracking && celestialEncoderMode);
             CHECK(simulated::commands.size() > commandsBefore);
             CHECK(Serial.output.find("AXIS YAW -> TRACK", outputBefore) != std::string::npos);
             CHECK(Serial.output.find("AXIS YAW -> PRECISION", outputBefore) == std::string::npos);
@@ -469,7 +529,7 @@ int main(int argc, char **argv) {
             CHECK(!bnoDiagnostics.accepted && alignmentSampleInvalid);
             CHECK(lastBnoGood == beforeReceipt && lastPlausibleAt == beforeDisplay);
             CHECK(orientation.heading == beforeYaw && physicalPitch() == beforePitch);
-            CHECK(celestialEncoderPaused && !celestialEncoderMode && celestialActive());
+            CHECK(!celestialEncoderPaused && celestialEncoderMode && celestialActive());
             advance(500); preserved(); CHECK(!celestialEncoderPaused);
             command("STOP"); recover();
         } else if (scenario == "track_manual") {
@@ -504,7 +564,9 @@ int main(int argc, char **argv) {
             CHECK(poseStopping || commandIdle()); recover();
         } else if (scenario == "no_progress") {
             simulated::motors[0].frozen = true; advance(20000);
-            CHECK(!poseActive && commandIdle()); recover();
+            CHECK(!poseActive && commandIdle());
+            CHECK(Serial.output.find("No measured yaw progress: axis deadline expired") != std::string::npos);
+            recover();
         } else if (scenario == "wrong_direction") {
             simulated::motors[0].physicalSign *= -1; advance(4000);
             CHECK(!poseActive && commandIdle()); recover();
@@ -519,4 +581,5 @@ int main(int argc, char **argv) {
         } else { std::fprintf(stderr, "Unknown celestial scenario\n"); return 2; }
     }
     std::printf("PASS celestial: %s\n", scenario.c_str());
+    return 0;
 }

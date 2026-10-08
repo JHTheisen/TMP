@@ -213,7 +213,7 @@ class RawCommandUiTests(unittest.TestCase):
                 result, writes, raw, _, log = self.run_ui([
                     (1.15, [text("POSE 20 8 -154"), key(pygame.K_RETURN), abort]),
                 ])
-                self.assertEqual(result, 1)
+                self.assertEqual(result, int(abort.type == pygame.KEYDOWN))
                 self.assertEqual(raw, [])
                 self.assertEqual(writes[-1][1], b"X\n")
                 self.assertIn("TX_ATTEMPT X", log)

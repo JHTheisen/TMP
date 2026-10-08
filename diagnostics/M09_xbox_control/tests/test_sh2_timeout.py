@@ -17,3 +17,11 @@ class ProductIdTimeoutTests(unittest.TestCase):
     def test_unexpected_dependency_is_not_silently_patched(self):
         with self.assertRaises(RuntimeError):
             patcher.patch_source("different upstream operation")
+
+    def test_failed_session_close_patch_is_narrow_and_repeatable(self):
+        source = "prefix\n    shtp_close(pSh2->pShtp);\nsuffix\n"
+        result = patcher.patch_close(source)
+        self.assertEqual(result.replace("if (pSh2->pShtp) ", ""), source)
+        self.assertEqual(patcher.patch_close(result), result)
+        with self.assertRaises(RuntimeError):
+            patcher.patch_close("different upstream close")

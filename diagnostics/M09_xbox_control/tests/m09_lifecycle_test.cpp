@@ -188,7 +188,7 @@ int main(int argc, char **argv) {
         line("JOG 250 250 250");
         CHECK(manualActive && yawMotor->isRunning() && pitchMotor->isRunning() && carriageMotor->isRunning());
         stream(250, 250, 250, 3200);
-        CHECK(simulated::bnoBeginCalls == 2 && simulated::sh2CloseCalls == 1);
+        CHECK(simulated::bnoBeginCalls == 2 && simulated::sh2CloseCalls == 2); // Old session and failed replacement.
         CHECK(manualActive && !commandWatchdog.tripped());
         CHECK(Serial.output.find("BNO_TRACE kind=STARTUP_ACCURACY_STUCK") != std::string::npos);
         CHECK(Serial.output.find("BNO_TRACE kind=REINIT_FAILURE") != std::string::npos);

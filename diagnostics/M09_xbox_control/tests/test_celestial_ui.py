@@ -169,6 +169,10 @@ class CelestialUiTests(unittest.TestCase):
                     self.rx += b"M09 READY\n"
                 elif verb == b"STATUS":
                     self.rx += f"M09 {self.mode}\n".encode()
+                elif verb == b"X":
+                    self.track_at = self.celestial_id = None
+                    self.mode = "ABORTED"
+                    self.rx += b"M09 ABORTED\n"
                 elif verb == b"CELESTIAL_TEST_UPDATE":
                     self.mode = "BUSY"
                 elif verb == b"CELESTIAL_GOTO":
@@ -502,7 +506,7 @@ class CelestialUiTests(unittest.TestCase):
             with self.subTest(at=at):
                 result, writes, _, _, _, _, _ = self.run_ui([(1.4, submit()),
                     (at, [pygame.event.Event(pygame.JOYBUTTONDOWN, instance_id=42, button=1)])])
-                self.assertEqual(result, 1)
+                self.assertEqual(result, 0)  # Tap aborts motion; window remains open.
                 self.assertEqual(writes[-1][1], b"X\n")
                 self.assertFalse(any(stamp >= at and data == b"CELESTIAL_TEST_UPDATE\n" for stamp, data in writes))
 

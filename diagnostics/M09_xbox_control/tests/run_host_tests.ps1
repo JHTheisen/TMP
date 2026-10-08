@@ -1,5 +1,6 @@
 param([string]$Compiler = 'C:\Strawberry\c\bin\g++.exe',
-      [string]$Python = "$env:USERPROFILE\.platformio\penv\Scripts\python.exe")
+      [string]$Python = "$env:USERPROFILE\.platformio\penv\Scripts\python.exe",
+      [switch]$SkipPython)
 $ErrorActionPreference = 'Stop'
 $projectPath = Split-Path -Parent $PSScriptRoot
 $previousPythonPath = $env:PYTHONPATH
@@ -18,13 +19,16 @@ try {
         }
     }
     # Separately test encoder restoration before the integrated motion suites.
-    foreach ($unit in @('encoder_acquisition','control_math','pose_math','watchdog','bno_observer','bno_diagnostics','bno_trace','sensor_handoff','sensor_result','pitch_direction_diagnostics')) {
+    foreach ($unit in @('bno_packet_reader','encoder_acquisition','control_math','pose_math','watchdog','bno_observer','bno_diagnostics','bno_trace','sensor_handoff','sensor_result','pitch_direction_diagnostics')) {
         Build-Test "$($unit)_test.cpp" $unit
         & ".pio/host_tests/$unit.exe"
         if ($LASTEXITCODE -ne 0) { throw "Unit test failed: $unit" }
     }
     Build-Test 'sensor_worker_stall_test.cpp' 'sensor_worker_stall'
     Run-Cases 'sensor_worker_stall' @('jog','host_loss','stop','center','encoder','buffered_noise')
+    Build-Test 'bno_startup_test.cpp' 'bno_startup'
+    Run-Cases 'bno_startup' @('address_a','address_b','reset_b','accuracy_b','late_ack','no_ack','retry','failed',
+        'early_failed','bus_failed','report_failed','low_accuracy','abort_retry','slow_stop','slow_lease')
     Build-Test 'm09_lifecycle_test.cpp' 'lifecycle'
     Run-Cases 'lifecycle' @('startup_valid','startup_missing_bno','startup_init_failure','startup_report_failure',
         'startup_bus_a_failure','startup_bus_b_failure','startup_low_accuracy','startup_invalid','startup_stale',
@@ -57,6 +61,8 @@ try {
         'manual_handoff','level_manual_first_yaw','pending_stop','level_forced','north_forced','level_pause_stop','north_pause_stop')
     Build-Test 'keyframe_math_test.cpp' 'keyframe_math'
     Build-Test 'celestial_motion_test.cpp' 'celestial_motion'
+    Build-Test 'celestial_primary_feedback_test.cpp' 'celestial_primary_feedback'
+    Run-Cases 'celestial_primary_feedback' @('here_healthy','here_degraded','radec_healthy','radec_degraded','invalid_encoder','unscaled','learn_manual','learn_gap')
     Build-Test 'celestial_low_rate_test.cpp' 'celestial_low_rate'
     Run-Cases 'celestial_low_rate' @('stable','minimum_rate','zero','below_minimum','reverse','pending_period','brake_stuck',
         'startup_latch','startup_fails','startup_timeout','unexpected_stop','forced_restart','takeover','lease','sensor_pause')
@@ -75,12 +81,13 @@ try {
         'lease','track_lease','stale_update','target_jump','updated_guard','no_progress','wrong_direction',
         'deadline','blocked_foreground','track_rate_smooth','track_rate_noise','track_rate_wrap',
         'track_rate_reverse','track_rate_lease','track_rate_unscaled_recovery','track_rate_fallback',
-        'track_rate_stall','track_rate_rejected','track_rate_jitter','track_rate_weak','track_rate_residual','track_malformed',
+        'track_rate_stall','track_rate_stall_pitch','track_rate_wrong_direction','track_rate_rejected','track_rate_jitter','track_rate_weak','track_rate_residual','track_malformed',
+        'track_persistent_error','track_large_error','track_lease_boundary',
         'track_sign_positive','track_sign_negative','track_sign_residual_positive','track_sign_residual_negative')
     & '.pio/host_tests/keyframe_math.exe'
     if ($LASTEXITCODE -ne 0) { throw 'Keyframe timing math failed' }
     Build-Test 'keyframe_motion_test.cpp' 'keyframe_motion'
-    Run-Cases 'keyframe_motion' @('snapshot','reject','admission','travel','missing_bno','stall_continue','configuration','partial_start',
+    Run-Cases 'keyframe_motion' @('snapshot','reject','admission','travel','stepped','missing_bno','stall_continue','configuration','partial_start',
         'complete','zero_axis','no_op','stop','brake_timeout','abort','stale','reset','pitch_guard','stall_stop','unexpected_stop')
     # Keep old startup/fallback regression evidence against M08, which is unchanged.
     Build-Test 'north_level_integration_test.cpp' 'm08_startup'
@@ -101,10 +108,12 @@ try {
     Run-Cases 'm08_pitch_readiness' $pitchScenarios
     # unittest's normal progress uses stderr; Windows PowerShell must not turn
     # passing test output into a terminating NativeCommandError under redirection.
-    $ErrorActionPreference = 'Continue'
-    & $Python -B -m unittest discover -s tests -p 'test_*.py' -v
-    $pythonExit = $LASTEXITCODE
-    $ErrorActionPreference = 'Stop'
-    if ($pythonExit -ne 0) { throw 'Python tests failed' }
+    if (-not $SkipPython) {
+        $ErrorActionPreference = 'Continue'
+        & $Python -B -m unittest discover -s tests -p 'test_*.py' -v
+        $pythonExit = $LASTEXITCODE
+        $ErrorActionPreference = 'Stop'
+        if ($pythonExit -ne 0) { throw 'Python tests failed' }
+    }
     & (Join-Path $PSScriptRoot 'verify_m08_baseline.ps1')
 } finally { $env:PYTHONPATH = $previousPythonPath; Pop-Location }

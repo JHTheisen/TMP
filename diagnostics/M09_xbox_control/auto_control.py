@@ -2,6 +2,8 @@
 from dataclasses import dataclass
 import math
 from celestial_control import CelestialTracker, parse_tracking_command, RESULT_MAX_AGE
+from celestial_targets import NamedTarget
+from stepped_playback import PhotoSettings, SteppedPlayback
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,9 @@ class AutoSession:
         self.celestial_feedback = ""
         self.celestial_source = ""
         self._manual_rearm_required = False
+        self.photo_settings = PhotoSettings()
+        self.stepped = None
+        self.camera_events = []
 
     def _require_manual_rearm(self):
         self._manual_rearm_required = True
@@ -52,15 +57,16 @@ class AutoSession:
         self.celestial = CelestialTracker(observer, reference) if observer is not None else None
 
     def request_celestial(self, command, now, centered, dry_run=False):
-        target = parse_tracking_command(command)
+        target = command if isinstance(command, NamedTarget) else parse_tracking_command(command)
         if self.celestial is None:
             raise ValueError("Celestial tracking needs valid --latitude and --longitude settings.")
         if not dry_run and (not self.enabled or self.phase != "READY"):
             raise ValueError("Wait for READY before celestial GOTO; request was not queued.")
         if not centered:
             raise ValueError("Center sticks for 0.5 s before celestial GOTO.")
-        self.celestial_status = f"RA={target.ra_hours:.6f} h Dec={target.dec_deg:+.6f} deg"
-        self.celestial_source = "RA/DEC"
+        self.celestial_status = (target.name if isinstance(target, NamedTarget) else
+                                 f"RA={target.ra_hours:.6f} h Dec={target.dec_deg:+.6f} deg")
+        self.celestial_source = target.name if isinstance(target, NamedTarget) else "RA/DEC"
         if dry_run:
             self.note = "Celestial dry run: " + self.celestial_status + "; no motion or coordinate calculation."
             return None
@@ -158,6 +164,8 @@ class AutoSession:
         self.note = "Captures cleared: " + reason
 
     def cancel(self, now, reason="STOP sent; wait for READY."):
+        self.stepped = None
+        self.camera_events.clear()
         if self.celestial is not None:
             self.celestial.cancel()
         self.phase = "STOPPING"
@@ -220,15 +228,17 @@ class AutoSession:
         if action not in ("capture_a", "capture_b") and not centered:
             self.note = "Not queued: center sticks before requesting movement."
             return None
-        if action in ("return_a", "play") and "A" not in self.frames:
+        if action in ("return_a", "play", "play_stepped") and "A" not in self.frames:
             self.note = "Capture A first."
             return None
-        if action == "play" and "B" not in self.frames:
+        if action in ("play", "play_stepped") and "B" not in self.frames:
             self.note = "Capture B first."
             return None
         self.action = action
         self.raw_command = None
         self.play_duration = self.duration
+        self.stepped = (SteppedPlayback(self.frames["A"], self.frames["B"], self.photo_settings, self.duration)
+                        if action == "play_stepped" else None)
         self.phase = "PREFLIGHT_STOP"
         self.pending_id = self.continuation = None
         self.last_rx = now
@@ -237,6 +247,7 @@ class AutoSession:
         return self._command("STOP")
 
     def _finish(self, note):
+        self.stepped = None
         if self.action == "celestial" and self.celestial is not None:
             self.celestial.cancel()
         self.phase = "FINISH_WAIT"
@@ -269,7 +280,7 @@ class AutoSession:
                 self.phase = "READY"
                 self.deadline = None
             elif self.phase == "PREFLIGHT_STOP":
-                if self.action in ("capture_a", "capture_b", "return_a", "play"):
+                if self.action in ("capture_a", "capture_b", "return_a", "play", "play_stepped"):
                     self._snapshot(now)
                 elif self.action in ("level", "north"):
                     self._new_request(self.action, "MOVE_PENDING", now)
@@ -285,6 +296,13 @@ class AutoSession:
                 self.settle_until = now + .2
                 self.deadline = now + 4.0
                 self.note = "Generated-step return complete; checking stopped A before timed playback."
+            elif self.phase == "PHOTO_READY_WAIT" and self.stepped is not None:
+                # RESULT PASS proves all motors stopped at the requested steps;
+                # READY confirms the firmware released the completed operation.
+                self.phase = "PHOTO_SETTLE"
+                self.settle_until = now + self.stepped.settings.settle_seconds
+                self.deadline = self.settle_until + 4.0
+                self.note = "Photo waypoint stopped; settling before camera event."
             elif self.phase in ("STOPPING", "FINISH_WAIT"):
                 self.phase = "READY"
                 self.deadline = None
@@ -313,7 +331,7 @@ class AutoSession:
                     self.deadline = None
                     self.note = "Tracking; move sticks to take over, Space/F12 STOP, B abort."
             if line.startswith("CELESTIAL_STATE "):
-                self.celestial_feedback = "BNO target/error yaw=" + fields.get("yaw_target", "?") + "/" + fields.get("yaw_error", "?") + " pitch=" + fields.get("pitch_target", "?") + "/" + fields.get("pitch_error", "?") + " deg"
+                self.celestial_feedback = fields.get("feedback", "BNO") + " target/error yaw=" + fields.get("yaw_target", "?") + "/" + fields.get("yaw_error", "?") + " pitch=" + fields.get("pitch_target", "?") + "/" + fields.get("pitch_error", "?") + " deg"
                 return
             if line.startswith("CELESTIAL_RESULT "):
                 if fields.get("status") == "FAILED":
@@ -387,6 +405,9 @@ class AutoSession:
                 self.invalidate("keyframe epoch mismatch")
                 self._finish(self.note)
                 return
+            if self.stepped is not None and not travel:
+                self._prepare_photo_move(now)
+                return
             ident = self._new_request("return" if travel else "play", "KEYMOVE_PREPARED", now)
             line = f"{'KEYRETURN' if travel else 'KEYMOVE'} {ident} {epoch} {target.steps[0]} {target.steps[1]} {target.steps[2]}"
             self.continuation = self._command(line if travel else line + f" {self.play_duration * 1000}")
@@ -396,13 +417,25 @@ class AutoSession:
             self.deadline = now + 4.0
         elif matching and self.phase == "KEYMOVE_PENDING" and line.startswith("KEYMOVE ACCEPTED "):
             self.phase = "KEYMOVE_ACTIVE"
-            self.deadline = now + (65 if self.purpose == "return" else self.play_duration + 5)
+            self.deadline = now + (65 if self.purpose == "return" else
+                                   (self.stepped.segment_ms / 1000 + 5 if self.stepped else self.play_duration + 5))
         elif matching and self.phase in ("KEYMOVE_PENDING", "KEYMOVE_ACTIVE") and line.startswith("KEYMOVE RESULT "):
             if fields.get("status") == "FAILED":
                 self.invalidate("keyframe motion failed")
-            if fields.get("status") == "PASS" and self.purpose == "return" and self.action == "play":
+            if fields.get("status") == "PASS" and self.purpose == "return" and self.action in ("play", "play_stepped"):
                 self.phase = "RETURN_WAIT"
                 self.pending_id = self.continuation = None
+            elif fields.get("status") == "PASS" and self.purpose == "photo" and self.stepped is not None:
+                try:
+                    actual = tuple(int(fields[name]) for name in ("yaw_steps", "pitch_steps", "carriage_steps"))
+                    valid = int(fields["epoch"]) == self.stepped.start.epoch and actual == self.stepped.last_target
+                except (KeyError, ValueError):
+                    valid = False
+                if not valid:
+                    self._finish("Photo waypoint confirmation invalid; no camera event.")
+                else:
+                    self.phase = "PHOTO_READY_WAIT"
+                    self.pending_id = self.continuation = None
             else:
                 self._finish(line)
             self.deadline = now + 4.0
@@ -426,6 +459,23 @@ class AutoSession:
             self.phase = "FAULT"
             self.deadline = None
             return b"STOP\n"
+        if self.stepped is not None and self.phase in ("PHOTO_SETTLE", "PHOTO_POST"):
+            if now < self.settle_until:
+                return None
+            if self.phase == "PHOTO_SETTLE":
+                self.camera_events.append(self.stepped.trigger(now))
+                self.phase = "PHOTO_POST"
+                self.settle_until = now + self.stepped.settings.post_seconds
+                self.deadline = self.settle_until + 4.0
+                self.note = f"Camera event {self.stepped.index}/{self.stepped.settings.segments}; motors stopped."
+                return None
+            if self.stepped.complete:
+                self.stepped = None
+                self.phase = "READY"
+                self.pending_id = self.purpose = self.continuation = self.action = self.deadline = None
+                self.note = "Stepped playback complete at B; photo events delivered."
+                return None
+            self._prepare_photo_move(now)
         if self.action == "celestial":
             try:
                 if self.phase == "CELESTIAL_PREPARING":
@@ -464,10 +514,29 @@ class AutoSession:
             return command
         return None
 
+    def _prepare_photo_move(self, now):
+        self.stepped.last_target = self.stepped.target()
+        ident = self._new_request("photo", "KEYMOVE_PREPARED", now)
+        yaw, pitch, carriage = self.stepped.last_target
+        self.continuation = self._command(
+            f"KEYMOVE {ident} {self.stepped.start.epoch} {yaw} {pitch} {carriage} {self.stepped.segment_ms}")
+        self.note = f"Moving to photo waypoint {self.stepped.index + 1}/{self.stepped.settings.segments}."
+
+    def take_camera_events(self):
+        """Nonblocking hook: consume exposure requests only after a confirmed stop.
+
+        The default host logs these events. A future shutter adapter can consume
+        them without changing waypoint or ESP32 motion execution.
+        """
+        events, self.camera_events = self.camera_events, []
+        return events
+
     def _describe_celestial(self, result):
         target = self.celestial.target
         prefix = "TRACK HERE | " if self.celestial_source == "TRACK HERE" else ""
-        self.celestial_status = (f"{prefix}RA={target.ra_hours:.6f} h Dec={target.dec_deg:+.6f} deg | "
+        coordinates = (target.name if isinstance(target, NamedTarget) else
+                       f"{prefix}RA={target.ra_hours:.6f} h Dec={target.dec_deg:+.6f} deg")
+        self.celestial_status = (f"{coordinates} | "
                                  f"Alt={result.horizontal.altitude_deg:.3f} Az={result.horizontal.azimuth_deg:.3f} deg | "
                                  f"UTC={result.utc.isoformat(timespec='seconds')}")
         if result.horizontal.warnings:
@@ -479,5 +548,5 @@ class AutoSession:
                 "LB (4): capture A | RB (5): capture B | X button (2): duration | Home (10): Play A->B",
                 "LS click (8): return A | RS click (9): 1/2 deg | D-pad: up/down pitch, right/left yaw",
                 "A (0): LEVEL pitch | Y (3): NORTH yaw (magnetic)",
-                "Space/F12: STOP | B / keyboard X: abort | Move sticks to take over automatic motion",
+                "Space/F12: STOP | B / keyboard X: abort; hold B 2s to exit | Move sticks to take over automatic motion",
                 f"Generated steps (startup-relative, unhomed): {captures}", self.note] + self.celestial_display_lines()

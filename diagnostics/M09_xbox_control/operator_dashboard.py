@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import math
 import textwrap
 import time
+from celestial_targets import SOLAR_TARGETS, STAR_TARGETS, TARGETS, TargetPreview
+from stepped_playback import PhotoSettings
 
 
 BG = (14, 18, 24)
@@ -96,6 +98,14 @@ class OperatorDashboard:
         self.notice = ""
         self.buttons = {}
         self.fields = {}
+        self.show_targets = False
+        self.selected_name = None
+        self.target_preview = None
+        self.target_snapshot = None
+        self.show_photo = False
+        self.photo_segments = TextField("8", 1)
+        self.photo_settle = TextField("1.0", 3)
+        self.photo_post = TextField("0.5", 3)
 
     def toggle_diagnostics(self, visible=None):
         self.show_diagnostics = not self.show_diagnostics if visible is None else bool(visible)
@@ -118,6 +128,9 @@ class OperatorDashboard:
 
     def _paste(self, value):
         value = " ".join(value.split())
+        if self.focused_field and self.focused_field.startswith("photo_"):
+            getattr(self, self.focused_field).replace_selection(value)
+            return
         upper = value.upper()
         if upper.startswith("TRACK_RADEC "):
             value = value.split(None, 1)[1]
@@ -136,10 +149,29 @@ class OperatorDashboard:
             raise ValueError("Enter both RA and Dec before starting celestial tracking.")
         return f"TRACK_RADEC {ra} {dec}"
 
+    def photo_settings(self):
+        return PhotoSettings(int(self.photo_segments.value), float(self.photo_settle.value), float(self.photo_post.value))
+
+    def selected_target(self, now):
+        if self.selected_name is None:
+            raise ValueError("Select a celestial target first.")
+        snapshot = self.target_snapshot
+        if snapshot is None or now - snapshot.requested_at > TargetPreview.MAX_AGE:
+            raise ValueError("Wait for a current target position; check observer settings and ephem installation.")
+        if self.selected_name in snapshot.errors:
+            raise ValueError(snapshot.errors[self.selected_name])
+        horizontal = snapshot.positions[self.selected_name]
+        if horizontal.below_horizon:
+            raise ValueError(f"{self.selected_name} is below the horizon ({horizontal.altitude_deg:.1f} degrees).")
+        return TARGETS[self.selected_name]
+
     def handle_events(self, events, raw_mode=False):
         actions = []
         pygame = self.pygame
         for event in events:
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE and self.show_targets:
+                self.show_targets = False
+                continue
             if event.type == pygame.MOUSEBUTTONDOWN and getattr(event, "button", None) == 1:
                 pos = event.pos
                 selected = next((name for name, rect in self.fields.items() if rect.collidepoint(pos)), None)
@@ -155,7 +187,18 @@ class OperatorDashboard:
                     continue
                 action = next((name for name, rect in self.buttons.items() if rect.collidepoint(pos)), None)
                 if action:
-                    if action == "diagnostics":
+                    if action == "targets":
+                        self.show_targets = not self.show_targets
+                        self.show_photo = False
+                        self.blur_editor()
+                    elif action == "photo_options":
+                        self.show_photo = not self.show_photo
+                        self.show_targets = False
+                        self.blur_editor()
+                    elif action.startswith("target:"):
+                        self.selected_name = action.split(":", 1)[1]
+                        self.notice = f"Selected {self.selected_name}; press GOTO / TRACK to start."
+                    elif action == "diagnostics":
                         self.toggle_diagnostics()
                         # Diagnostics is presentation-only and never enters the
                         # controller action stream.
@@ -172,9 +215,10 @@ class OperatorDashboard:
                 field.replace_selection("".join(c for c in event.text if c.isprintable() and not c.isspace()))
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_TAB:
-                    self.focused_field = "dec" if self.focused_field == "ra" else "ra"
+                    names = ("photo_segments", "photo_settle", "photo_post") if self.focused_field.startswith("photo_") else ("ra", "dec")
+                    self.focused_field = names[(names.index(self.focused_field) + 1) % len(names)]
                 elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
-                    actions.append("track")
+                    actions.append("play_stepped" if self.focused_field.startswith("photo_") else "track")
                 elif event.key == pygame.K_ESCAPE:
                     self.blur_editor()
                 elif event.mod & pygame.KMOD_CTRL and event.key == pygame.K_v:
@@ -182,6 +226,75 @@ class OperatorDashboard:
                 else:
                     field.key(pygame, event)
         return actions
+
+    def _target_icon(self, screen, target, center):
+        pygame = self.pygame
+        x, y = center
+        if target.kind == "star":
+            points = [(x + math.sin(n * math.pi / 5) * (8 if n % 2 == 0 else 3),
+                       y - math.cos(n * math.pi / 5) * (8 if n % 2 == 0 else 3)) for n in range(10)]
+            pygame.draw.polygon(screen, (241, 224, 167), points)
+            return
+        colors = {"Sun": (255, 201, 77), "Moon": (210, 218, 226), "Mercury": (165, 157, 145),
+                  "Venus": (228, 196, 138), "Mars": (218, 115, 82), "Jupiter": (209, 169, 133),
+                  "Saturn": (226, 207, 156), "Uranus": (142, 214, 220), "Neptune": (89, 128, 228),
+                  "Pluto": (186, 159, 143)}
+        pygame.draw.circle(screen, colors[target.name], center, 8)
+        if target.name == "Saturn":
+            pygame.draw.ellipse(screen, colors[target.name], (x - 12, y - 4, 24, 8), 1)
+        elif target.name == "Moon":
+            pygame.draw.circle(screen, PANEL_ALT, (x + 4, y - 3), 7)
+        elif target.name == "Jupiter":
+            pygame.draw.line(screen, (150, 110, 90), (x - 6, y + 2), (x + 6, y + 2), 2)
+
+    def _target_picker(self, screen, now, top):
+        pygame = self.pygame
+        panel = pygame.Rect(16, top, screen.get_width() - 32, 342)
+        self._panel(screen, panel, PANEL_ALT)
+        # Covered controls cannot receive clicks; STOP/ABORT stay visible/live.
+        self.buttons = {name: rect for name, rect in self.buttons.items() if name in ("stop", "abort")}
+        self.fields.clear()
+        if self.target_preview is not None:
+            self.target_snapshot = self.target_preview.poll(now)
+        self._text(screen, self.font, "CHOOSE A CELESTIAL TARGET", (panel.x + 14, panel.y + 12))
+        self._button(screen, "targets", "Close", pygame.Rect(panel.right - 86, panel.y + 8, 72, 30))
+        snapshot = self.target_snapshot
+        current = snapshot is not None and now - snapshot.requested_at <= TargetPreview.MAX_AGE
+        tile_w = (panel.width - 28 - 4 * 8) // 5
+        for targets, label, label_y, tile_y in (
+                (SOLAR_TARGETS, "SOLAR SYSTEM", 49, 71), (STAR_TARGETS, "BRIGHT / REFERENCE STARS", 194, 216)):
+            self._text(screen, self.small, label, (panel.x + 14, panel.y + label_y), MUTED)
+            for index, target in enumerate(targets):
+                rect = pygame.Rect(panel.x + 14 + (index % 5) * (tile_w + 8),
+                                   panel.y + tile_y + (index // 5) * 58, tile_w, 52)
+                self.buttons["target:" + target.name] = rect
+                self._panel(screen, rect, PANEL)
+                if target.name == self.selected_name:
+                    pygame.draw.rect(screen, ACCENT, rect, 2, border_radius=8)
+                horizontal = snapshot.positions.get(target.name) if current else None
+                status, color = ("Unavailable" if current and target.name in snapshot.errors else "Checking..."), MUTED
+                if horizontal is not None:
+                    status = f"{'Below' if horizontal.below_horizon else 'Above'} {horizontal.altitude_deg:+.1f}\N{DEGREE SIGN}"
+                    color = AMBER if horizontal.below_horizon else GREEN
+                self._target_icon(screen, target, (rect.x + 17, rect.y + 16))
+                self._text(screen, self.small, target.name, (rect.x + 32, rect.y + 6))
+                self._text(screen, self.small, status, (rect.x + 10, rect.y + 29), color)
+        selected = "Selected: " + (self.selected_name or "none")
+        try:
+            self.selected_target(now)
+            ready = True
+        except ValueError:
+            ready = False
+        self._text(screen, self.font, selected, (panel.x + 14, panel.y + 283), ACCENT)
+        detail = ("Unrefracted horizon; positions refresh every 15 s." if ready else
+                  "Choose an above-horizon target with a current position.")
+        if self.target_preview is None:
+            detail = "Set observer latitude/longitude to calculate target positions."
+        elif current and self.selected_name in snapshot.errors:
+            detail = snapshot.errors[self.selected_name]
+        self._text(screen, self.small, detail[:85], (panel.x + 14, panel.y + 311), MUTED)
+        self._button(screen, "track_selected", "GOTO / TRACK",
+                     pygame.Rect(panel.right - 158, panel.y + 280, 144, 36), ACCENT if ready else PANEL)
 
     @staticmethod
     def _health(fields, received_at, now, bno=False):
@@ -342,12 +455,13 @@ class OperatorDashboard:
         self._panel(screen, celestial)
         active = auto.action == "celestial"
         feedback = session.celestial_fields.get("feedback", "")
-        degraded = session.celestial_fields.get("bno") == "DEGRADED" or feedback == "AS5600"
+        degraded = session.celestial_fields.get("bno") == "DEGRADED"
         celestial_label = "CELESTIAL TRACKING ACTIVE" if active else "CELESTIAL TARGET"
         self._text(screen, self.font, celestial_label, (celestial.x + 14, celestial.y + 12),
                    AMBER if degraded else (ACCENT if active else TEXT))
+        self._button(screen, "targets", "Choose target", pygame.Rect(celestial.right - 138, celestial.y + 8, 124, 30))
         if active:
-            source = "ENCODER PROPAGATED / BNO DEGRADED" if degraded else (feedback or "BNO REFERENCE")
+            source = "ENCODER PROPAGATED / BNO DEGRADED" if degraded else ("AS5600 PRIMARY / BNO REFERENCE" if feedback == "AS5600" else feedback or "BNO REFERENCE")
             self._text(screen, self.small, source, (celestial.x + 310, celestial.y + 16), AMBER if degraded else GREEN)
         self._text(screen, self.small, auto.celestial_status or "No active celestial target", (celestial.x + 14, celestial.y + 42), MUTED)
         field_y = celestial.y + 68
@@ -369,6 +483,7 @@ class OperatorDashboard:
         controls = pygame.Rect(margin, controls_y, width - 2 * margin, 102)
         self._panel(screen, controls)
         self._text(screen, self.small, "OPERATOR CONTROLS", (controls.x + 14, controls.y + 10), MUTED)
+        self._button(screen, "photo_options", "Stepped photos...", pygame.Rect(controls.right - 164, controls.y + 3, 150, 27))
         labels = [("level", "LEVEL"), ("north", "NORTH"), ("capture_a", "CAPTURE A"),
                   ("capture_b", "CAPTURE B"), ("return_a", "RETURN A"), ("play", "PLAY A→B")]
         button_gap = 8
@@ -395,6 +510,26 @@ class OperatorDashboard:
         if raw_mode := session.raw_mode:
             self._text(screen, self.font, "RAW MODE — JOG DISABLED", (footer.x + 14, footer.y + 77), AMBER)
             self._text(screen, self.mono, "> " + session.raw_text + "_", (footer.x + 14, footer.y + 101), TEXT)
+
+        if self.show_targets:
+            self._target_picker(screen, now, celestial_y)
+        if self.show_photo:
+            panel = pygame.Rect(16, celestial_y, width - 32, 278)
+            self._panel(screen, panel, PANEL_ALT)
+            self.buttons = {name: rect for name, rect in self.buttons.items() if name in ("stop", "abort")}
+            self.fields.clear()
+            self._text(screen, self.font, "STEPPED KEYFRAMES / STILL PHOTOS", (panel.x + 14, panel.y + 14))
+            self._button(screen, "photo_options", "Close", pygame.Rect(panel.right - 86, panel.y + 8, 72, 30))
+            field_w = (panel.width - 48) // 3
+            for index, (name, label) in enumerate((("photo_segments", "MOVEMENT SEGMENTS (1-64)"),
+                                                  ("photo_settle", "SETTLE DELAY (seconds)"),
+                                                  ("photo_post", "AFTER PHOTO (seconds)"))):
+                self._field(screen, name, label, getattr(self, name),
+                            pygame.Rect(panel.x + 14 + index * (field_w + 10), panel.y + 64, field_w, 66))
+            self._text(screen, self.small, "Return to A, then stop and request a photo at each waypoint, including B.", (panel.x + 14, panel.y + 151))
+            self._text(screen, self.small, f"Movement budget: {auto.duration}s total; each segment takes at least 1s. Camera hook: log event only.", (panel.x + 14, panel.y + 174), MUTED)
+            self._text(screen, self.small, self.notice or auto.note, (panel.x + 14, panel.y + 199), MUTED)
+            self._button(screen, "play_stepped", "START STEPPED", pygame.Rect(panel.right - 178, panel.bottom - 50, 164, 36), ACCENT)
 
         if self.show_diagnostics:
             # A full overlay keeps verbose telemetry readable without growing

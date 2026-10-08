@@ -9,6 +9,7 @@ import queue
 import threading
 
 from celestial_coordinates import AstropyConverter, EquatorialTarget, HorizontalTarget
+from celestial_targets import NamedTarget, NamedTargetConverter
 
 UPDATE_INTERVAL = 1.0
 RESULT_MAX_AGE = 2.0
@@ -78,13 +79,14 @@ class CoordinateWorker:
 
     def _run(self):
         converter = None
+        named_converter = None
         while not self._closed.is_set():
             job = self._jobs.get()
             if job is None:
                 return
             kind, generation, value, requested_at = job
             try:
-                if converter is None:
+                if converter is None and not isinstance(value, NamedTarget):
                     converter = self._factory(self.observer)
                 if kind == "capture":
                     utc = value.utc or self._utc_clock()
@@ -93,7 +95,12 @@ class CoordinateWorker:
                 else:
                     utc = self._utc_clock()
                     target = value
-                    horizontal = converter.altaz(target, utc)
+                    if isinstance(target, NamedTarget):
+                        if named_converter is None:
+                            named_converter = NamedTargetConverter(self.observer)
+                        horizontal = named_converter.altaz(target, utc)
+                    else:
+                        horizontal = converter.altaz(target, utc)
                 mount = self.reference.mount_target(horizontal)
                 result = Calculation(generation, requested_at, utc, horizontal, mount, target=target)
             except Exception as error:

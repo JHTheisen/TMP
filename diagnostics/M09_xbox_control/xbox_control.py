@@ -11,6 +11,22 @@ SEND_INTERVAL = 0.020
 COMMAND_TIMEOUT = 0.250  # Same command lease as the firmware; a lapse needs a new arm.
 
 
+class ExitHold:
+    """Application exit only; the B-button motor abort remains immediate."""
+    def __init__(self):
+        self.started = None
+
+    def press(self, now):
+        if self.started is None:
+            self.started = now
+
+    def release(self):
+        self.started = None
+
+    def ready(self, now):
+        return self.started is not None and now - self.started >= 2.0
+
+
 def stick_command(value, deadband=0.15, scale=0.25, invert=False):
     """Continuous deadband rescaling; exact zero at rest, quadratic fine control."""
     if not math.isfinite(value):
@@ -126,7 +142,7 @@ class ManualSession:
                 self.readiness_note = "Center sticks for 0.5 s to enable manual control."
         elif line == "M09 BUSY":
             self.ready = False
-            if self.state in ("active", "arming"):
+            if self.state in ("active", "arming 
                 self.disarm("Firmware unavailable; wait for READY and rearm.", request_stop=True)
 
     def diagnostic_lines(self, now):
@@ -320,6 +336,9 @@ def main(argv=None):
             pass  # Older SDL builds still retain ordinary resizable window chrome.
         pygame.key.stop_text_input()  # Ordinary control keys are never command text.
         dashboard = OperatorDashboard(pygame, timing=log.timing, clock=time.monotonic)
+        if auto.celestial is not None:
+            from celestial_targets import TargetPreview
+            dashboard.target_preview = TargetPreview(auto.celestial.observer)
         lines = []
         if not args.dry_run:
             import serial
@@ -354,6 +373,7 @@ def main(argv=None):
         diagnostic_snapshot = None
         response_snapshot = []
         held_buttons = set()
+        exit_hold = ExitHold()
         hat_neutral = True
         input_notice = "LB/RB capture; Home plays; A = LEVEL; Y = magnetic NORTH."
         takeover = False
@@ -441,10 +461,15 @@ def main(argv=None):
                     continue
                 if event.type == pygame.JOYBUTTONUP:
                     held_buttons.discard(event.button)
+                    if event.button == 1:
+                        exit_hold.release()
+                        log.event("EXIT_HOLD", "B released; pending application exit canceled")
                 elif event.type == pygame.JOYBUTTONDOWN:
                     if event.button not in held_buttons:
                         fresh_buttons.add(index)
                     held_buttons.add(event.button)
+                    if event.button == 1:
+                        exit_hold.press(now)
                     input_notice = f"Controller button {event.button} down"
                     log.event("CONTROLLER_INPUT", input_notice)
                 elif event.type == pygame.JOYHATMOTION and event.hat == args.move_hat:
@@ -459,16 +484,28 @@ def main(argv=None):
                         hat_neutral = False
             # Safety actions win over Enter even when queued later in the same
             # pygame batch. No raw move should precede an already-pending stop.
-            if ("abort" in ui_actions or
-                    any(pressed(event, pygame.K_x) or selected_button(event, 1) for event in events)):
+            if "abort" in ui_actions or any(pressed(event, pygame.K_x) for event in events):
                 explicit_abort = True
                 raise RuntimeError("Operator latched abort")
+            b_abort = any(selected_button(event, 1) for event in events)
+            if b_abort:
+                explicit_abort = True
+                if not args.dry_run:
+                    send(b"X\n")
+                auto.receive("M09 ABORTED", now)
+                session.receive("M09 ABORTED", now)
+                takeover = False
+                centered_since = last_jog = None
+                log.event("EXIT_HOLD", "B: immediate latched abort; hold continuously for 2 seconds to exit")
+            if exit_hold.ready(now):
+                log.event("EXIT_HOLD", "B held for 2 seconds; exiting application")
+                break
             if any(event.type == pygame.QUIT or pressed(event, pygame.K_ESCAPE) for event in events):
                 break
             toggling_raw = any(pressed(event, pygame.K_F2) for event in events)
             safety_stop = ("stop" in ui_actions or
                            any(pressed(event, pygame.K_F12) or pressed(event, pygame.K_SPACE) for event in events))
-            suppress_submit = safety_stop or toggling_raw
+            suppress_submit = safety_stop or toggling_raw or b_abort
             if safety_stop:
                 takeover = False
                 centered_since = None
@@ -607,22 +644,24 @@ def main(argv=None):
                 for action in ui_actions:
                     if action in ("stop", "abort", "diagnostics"):
                         continue
-                    if action == "track":
+                    if action in ("track", "track_selected"):
                         try:
-                            command = dashboard.celestial_command()
+                            command = (dashboard.selected_target(now) if action == "track_selected" else
+                                       dashboard.celestial_command())
                             data = auto.request_celestial(
                                 command, now,
                                 centered_since is not None and now - centered_since >= .5,
                                 dry_run=args.dry_run)
-                            session.last_raw_command = command
+                            session.last_raw_command = command if isinstance(command, str) else command.describe()
                         except ValueError as error:
                             notice = str(error)
                             dashboard.notice = notice
                             log.event("CELESTIAL_NOT_SENT", notice)
                             lines = (lines + [notice])[-8:]
                         else:
+                            dashboard.show_targets = False
                             dashboard.notice = "Celestial request accepted by host."
-                            log.event("CELESTIAL_REQUEST", command)
+                            log.event("CELESTIAL_REQUEST", session.last_raw_command)
                             if args.dry_run:
                                 print(f"AUTO DRY RUN: {command!r}")
                             elif data is not None:
@@ -654,9 +693,16 @@ def main(argv=None):
                                 takeover = False
                                 send(data)
                         continue
-                    if action in ("level", "north", "capture_a", "capture_b", "return_a", "play"):
+                    if action in ("level", "north", "capture_a", "capture_b", "return_a", "play", "play_stepped"):
+                        if action == "play_stepped":
+                            try:
+                                auto.photo_settings = dashboard.photo_settings()
+                            except ValueError as error:
+                                dashboard.notice = str(error)
+                                continue
                         data = auto.request(action, now, centered_since is not None and now - centered_since >= .5)
                         if data is not None:
+                            dashboard.show_photo = False
                             session.stop_raw(now)
                             session.auto_mode = True
                             last_jog = centered_since = None
@@ -714,6 +760,8 @@ def main(argv=None):
                 if command is not None:
                     log.event("AUTO_TX", repr(command))
                     send(command)
+                for event in auto.take_camera_events():
+                    log.event("CAMERA_TRIGGER", f"segment={event.segment}/{event.segments} epoch={event.epoch} steps={event.steps} at={event.requested_at:.3f} hook=EVENT_ONLY")
             if port is not None and now >= next_status:
                 send(b"STATUS\n")
                 next_status = now + 0.5
@@ -738,7 +786,8 @@ def main(argv=None):
                     joystick_name=joystick.get_name(),
                     serial_label="DRY RUN - CLOSED" if args.dry_run else f"{args.port} | {session.state.upper()}",
                     yaw=yaw, pitch=pitch, carriage=carriage, centered=centered,
-                    raw_axes=raw, input_notice=dashboard.notice or input_notice,
+                    raw_axes=raw, input_notice=(f"B abort sent. Exit in {max(0, 2 - (now - exit_hold.started)):.1f}s; release to keep dashboard open."
+                                               if exit_hold.started is not None else dashboard.notice or input_notice),
                     log_label=(log.path.name if log.path else "UNAVAILABLE"),
                     display_frozen=display_frozen,
                     diagnostic_lines=(diagnostic_snapshot + auto.display_lines()),

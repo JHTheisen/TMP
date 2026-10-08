@@ -14,6 +14,20 @@
 extern "C" int m09_sh2_request_product_id(void);
 
 namespace m09 {
+enum class BnoInitStage { WAITING, BUS_UNAVAILABLE, NO_ACK, INITIALIZING, HANDSHAKE_FAILED, REPORT_FAILED, READY };
+inline const char *bnoInitStageText(BnoInitStage stage) {
+    switch (stage) {
+    case BnoInitStage::BUS_UNAVAILABLE: return "BUS_UNAVAILABLE";
+    case BnoInitStage::NO_ACK: return "NO_ACK";
+    case BnoInitStage::INITIALIZING: return "INITIALIZING";
+    case BnoInitStage::HANDSHAKE_FAILED: return "HANDSHAKE_FAILED";
+    case BnoInitStage::REPORT_FAILED: return "REPORT_ENABLE_FAILED";
+    case BnoInitStage::READY: return "REPORTS_ENABLED";
+    default: return "WAITING";
+    }
+}
+constexpr uint8_t BNO_STARTUP_ATTEMPTS = 3;
+constexpr uint32_t BNO_STARTUP_RETRY_MS = 1000;
 struct SensorControlContext {
     BnoTraceEvent trace;
     bool queryIdle = false, halted = false;
@@ -24,6 +38,9 @@ struct EncoderSnapshot {
 };
 struct SensorSnapshot {
     bool setupDone = false, bnoInitialized = false, reportEnabled = false;
+    BnoInitStage bnoInitStage = BnoInitStage::WAITING;
+    uint8_t bnoAddress = 0, bnoAttempts = 0, probe4A = 255, probe4B = 255;
+    bool bnoRetryPending = false;
     uint32_t consumedResets = 0, reportFailures = 0, writeFailures = 0, sampleDrops = 0;
     EncoderSnapshot encoders;
     BnoIoStatistics io;
@@ -94,6 +111,7 @@ private:
     sh2_SensorValue_t event_{}; // library callback pointer remains valid between calls
     uint32_t lastReportAttempt_ = 0, consumedEpoch_ = 0;
     uint32_t startupReportAt_ = 0, recoveryStartedAt_ = 0;
+    uint32_t startupAttemptEndedAt_ = 0;
     bool startupAccuracyMonitoring_ = false, startupRecoveryAttempted_ = false;
     bool startupRecoveryPending_ = false;
 #ifdef M07_HOST_TEST
@@ -127,14 +145,53 @@ private:
         lastReportAttempt_ = millis();
         state_.reportEnabled = bno_.enableReport(SH2_ROTATION_VECTOR, milestone4::BNO_REPORT_INTERVAL_US);
         if (!state_.reportEnabled) ++state_.reportFailures;
+        state_.bnoInitStage = state_.reportEnabled ? BnoInitStage::READY : BnoInitStage::REPORT_FAILED;
         trace("REPORT_ENABLE", micros(), 0, SH2_ROTATION_VECTOR, milestone4::BNO_REPORT_INTERVAL_US, 0, state_.reportEnabled);
     }
     bool beginBnoSession() {
-        state_.bnoInitialized = bno_.begin_I2C(0x4A, &Wire1);
+        state_.reportEnabled = false;
+        state_.bnoInitStage = BnoInitStage::INITIALIZING;
+        publish();
+        const uint32_t start = micros();
+        trace("INIT_BEGIN", start, 0, state_.bnoAddress, state_.bnoAttempts);
+        state_.bnoInitialized = bno_.begin_I2C(state_.bnoAddress, &Wire1);
+        trace("INIT_RESULT", start, micros()-start, state_.bnoAddress, state_.bnoAttempts,
+              state_.io.ioFailures, state_.bnoInitialized);
         if (state_.io.productGeneration == state_.io.resetEvents)
             state_.io.queriedGeneration = state_.io.resetEvents;
         if (state_.bnoInitialized) enableReport();
+        else {
+            state_.bnoInitStage = BnoInitStage::HANDSHAKE_FAILED;
+            // begin_I2C can fail before SH-2 opens, or after allocating SHTP.
+            // The pinned close patch handles both and releases a partial session
+            // before a retry. Never recreate/end the shared TwoWire bus here.
+            sh2_close();
+        }
         return state_.bnoInitialized && state_.reportEnabled;
+    }
+    uint8_t probeBno(uint8_t address) {
+        const uint32_t start = micros();
+        Wire1.beginTransmission(address);
+        const uint8_t result = Wire1.endTransmission();
+        trace("ADDRESS_PROBE", start, micros()-start, address, state_.bnoAttempts, 0, result);
+        return result;
+    }
+    void attemptStartup() {
+        ++state_.bnoAttempts;
+        state_.probe4A = probeBno(0x4A);
+        state_.probe4B = probeBno(0x4B);
+        state_.bnoAddress = state_.probe4A == 0 ? 0x4A : (state_.probe4B == 0 ? 0x4B : 0);
+        if (!state_.bnoAddress) state_.bnoInitStage = BnoInitStage::NO_ACK;
+        else if (beginBnoSession()) beginStartupAccuracyMonitor();
+        startupAttemptEndedAt_ = millis();
+        // Only failed initial connection is retried. A working sensor, later
+        // BNO loss in TRACK, and the existing one-shot accuracy recovery never
+        // enter this startup retry path. Report enabling has its own recovery.
+        state_.bnoRetryPending = !state_.bnoInitialized && state_.bnoAttempts < BNO_STARTUP_ATTEMPTS;
+        if (state_.bnoRetryPending)
+            trace("STARTUP_RETRY_WAIT", micros(), 0, state_.bnoAttempts, BNO_STARTUP_RETRY_MS);
+        else if (!state_.bnoInitialized)
+            trace("STARTUP_EXHAUSTED", micros(), 0, state_.bnoAttempts, state_.bnoAddress);
     }
     void beginStartupAccuracyMonitor() {
         startupReportAt_ = millis();
@@ -212,12 +269,10 @@ private:
         const bool b = Wire1.begin(tmp_hardware::I2C_BUS_B_SDA_PIN, tmp_hardware::I2C_BUS_B_SCL_PIN, 100000);
         Wire.setTimeOut(50); Wire1.setTimeOut(50);
         encoders_.begin(a, b, millis());
-        if (b) {
-            Wire1.beginTransmission(0x4A);
-            if (Wire1.endTransmission() == 0) {
-                if (beginBnoSession()) beginStartupAccuracyMonitor();
-            }
-        }
+        trace("BUS_INIT", micros(), 0, 0, tmp_hardware::I2C_BUS_A_SDA_PIN, tmp_hardware::I2C_BUS_A_SCL_PIN, a);
+        trace("BUS_INIT", micros(), 0, 1, tmp_hardware::I2C_BUS_B_SDA_PIN, tmp_hardware::I2C_BUS_B_SCL_PIN, b);
+        if (b) attemptStartup();
+        else state_.bnoInitStage = BnoInitStage::BUS_UNAVAILABLE;
         state_.setupDone = true;
         publish();
     }
@@ -244,6 +299,8 @@ private:
         if (!state_.setupDone) initialize();
         control.read(context_);
         if (context_.halted) { publish(); return; }
+        if (state_.bnoRetryPending && millis()-startupAttemptEndedAt_ >= BNO_STARTUP_RETRY_MS)
+            attemptStartup();
         if (state_.bnoInitialized) {
             handleReset();
             if (!state_.reportEnabled && millis()-lastReportAttempt_ >= 500) enableReport();

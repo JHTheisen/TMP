@@ -14,10 +14,36 @@ public:
     explicit TwoWire(unsigned bus) : bus(bus) {}
     unsigned bus;
     bool beginFails = false;
+    uint8_t bnoAddress = 0x4A;
+    size_t bufferSize = 128;
+    bool bufferFails = false;
+    struct PacketFixture {
+        std::vector<uint8_t> data;
+        std::vector<size_t> requests;
+        unsigned failRequest = 0;
+        int failByte = -1;
+        bool changedHeader = false;
+        unsigned readIndex = 0;
+    } packet;
+    size_t setBufferSize(size_t value) {
+        if (bufferFails) return 0;
+        bufferSize = value; return value;
+    }
+    size_t requestFrom(uint16_t address, size_t count, bool stop) {
+        if (!stop || address != bnoAddress || count > bufferSize) std::abort();
+        packet.requests.push_back(count);
+        packet.readIndex = 0;
+        readingPacket_ = true;
+        simulated::sensorDelay(1);
+        if (packet.failRequest == packet.requests.size()) return 0;
+        return count <= packet.data.size() ? count : packet.data.size();
+    }
+    unsigned beginCalls = 0;
     uint8_t sda = 0, scl = 0;
     uint32_t frequency = 0;
     uint16_t timeout = 0;
     bool begin(uint8_t data, uint8_t clock, uint32_t hz) {
+        ++beginCalls;
         sda = data; scl = clock; frequency = hz;
         return !beginFails && !(bus == 1 && simulated::busBInitFails);
     }
@@ -38,9 +64,10 @@ public:
             simulated::sensorDelay(encoder.addressDelayMs);
             return encoder.present ? encoder.addressResult : 2;
         }
-        return bus == 1 && address_ == 0x4A && !simulated::bnoAckFails ? 0 : 2;
+        return bus == 1 && address_ == bnoAddress && !simulated::bnoAckFails ? 0 : 2;
     }
     size_t requestFrom(uint8_t address, uint8_t count) {
+        readingPacket_ = false;
         readIndex_ = 0;
         ++encoder.requests;
         encoder.requestedBytes = count;
@@ -48,13 +75,21 @@ public:
         return address == 0x36 && encoder.present ? encoder.requestLength : 0;
     }
     int read() {
+        if (readingPacket_) {
+            unsigned index = packet.readIndex++;
+            if (int(index) == packet.failByte || index >= packet.data.size()) return -1;
+            if (packet.changedHeader && packet.requests.size() == 2 && index == 3)
+                return packet.data[index] ^ 1;
+            return packet.data[index];
+        }
         const int index = readIndex_++;
         if (index == encoder.failedReadIndex || index >= encoder.requestLength) return -1;
         if (index == 0) return encoder.status;
         uint16_t raw = encoder.raw;
         if (simulated::encoderPlantFeedback && bus < 2) {
             double degrees = simulated::encoderBaselineDegrees[bus] +
-                simulated::motors[bus].position * simulated::encoderDegreesPerStep[bus];
+                (simulated::motors[bus].degrees + simulated::encoderAxisDisturbance[bus]) /
+                (-simulated::motors[bus].degreesPerStep) * simulated::encoderDegreesPerStep[bus];
             degrees = fmod(degrees, 360.0); if (degrees < 0) degrees += 360.0;
             raw = static_cast<uint16_t>(degrees * 4096.0 / 360.0) & 0x0fffU;
         }
@@ -63,6 +98,7 @@ public:
         return -1;
     }
 private:
+    bool readingPacket_ = false;
     uint8_t address_ = 0;
     int readIndex_ = 0;
 };

@@ -29,7 +29,7 @@ they are separate from the manual acceleration ceilings above.
 | --- | --- | --- | --- |
 | AS5600 A | Wire, SDA18/SCL19 | 0x36 | Wrapped sensor/magnet angle; celestial fallback assigns relative yaw |
 | AS5600 B | Wire1, SDA4/SCL5 | 0x36 | Pitch motor shaft before reduction; celestial fallback assigns relative pitch |
-| BNO085 | Wire1, SDA4/SCL5 | 0x4A | Moving-cradle orientation; qualified magnetic heading |
+| BNO085 | Wire1, SDA4/SCL5 | 0x4A or 0x4B | Moving-cradle orientation; qualified magnetic heading |
 
 Both buses retain 100 kHz and the configured 50 ms transaction timeout (the
 underlying ESP-IDF error path can still block longer). AS5600 STATUS and
@@ -43,8 +43,10 @@ feedback after BNO degradation, as described below.
 ## Startup and sensor availability
 
 Startup initializes motor control and the existing independent command watchdog,
-then starts a dedicated sensor worker. That worker initializes the two buses and
-attempts BNO setup once. Manual READY does not wait
+then starts a dedicated sensor worker. That worker initializes the two buses at
+100 kHz and probes BNO addresses 0x4A/0x4B on Bus B. Failed initial connection
+gets at most three attempts, separated by one second after each failed attempt.
+Manual READY does not wait
 for sensor success, magnetic accuracy, a stable reference or an automatic move.
 The old 500 ms application delay, 5 s hold and 20 s fallback gate are gone.
 
@@ -57,9 +59,13 @@ While stopped/idle, the original stable one-second windows can qualify pitch and
 north references. North still requires rotation-vector accuracy >=2 and the
 existing stability checks; accuracy 0/1 is never called calibrated. A sensor gap
 or reset invalidates orientation references; healthy idle samples can qualify
-new ones without a board reset. Report-enable recovery remains bounded. A BNO
-that failed initial setup remains unavailable until reset; no new repeated
-initialization loop was added.
+new ones without a board reset. Existing report-enable and one-shot startup
+accuracy recovery remain. Successful initialization disables connection retries;
+later BNO loss during TRACK never starts this retry sequence. After all three
+connection attempts fail, BNO remains unavailable until a board reset. Partial
+SH-2 sessions are safely closed before retrying, without restarting either I2C
+bus. See [BNO startup investigation](audit/BNO_STARTUP_FIX.md) for evidence,
+diagnostic fields, failure distinctions and validation.
 
 The sensor worker exclusively owns both I2C buses, BNO transport/recovery/product
 queries, and both AS5600 readers. Foreground command processing never performs or

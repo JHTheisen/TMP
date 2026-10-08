@@ -40,6 +40,25 @@ class LibraryPatchTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 patch("unsupported library")
 
+    def test_actual_sh2_close_releases_partial_session_and_accepts_null(self):
+        from test_sh2_timeout import patcher as lifecycle_patcher
+        source = lifecycle_patcher.patch_close((LIB / "sh2.c").read_text(encoding="utf-8"))
+        routine = function(source, "void sh2_close(void)")
+        self.compile_run(r'''
+#include <cassert>
+#include <cstring>
+struct sh2_t { void *pShtp; unsigned other; } _sh2;
+unsigned closes = 0;
+void shtp_close(void *session) { assert(session); ++closes; }
+''' + routine + r'''
+int main() {
+    sh2_close(); assert(closes == 0 && !_sh2.pShtp);
+    _sh2.pShtp = &closes; _sh2.other = 99;
+    sh2_close(); assert(closes == 1 && !_sh2.pShtp && !_sh2.other);
+    sh2_close(); assert(closes == 1);
+}
+''')
+
     def test_actual_timestamp_offsets_and_unsigned_clock_rollover(self):
         source = patcher.patch_sh2((LIB / "sh2.c").read_text(encoding="utf-8"))
         routine = function(source, "static uint64_t touSTimestamp(")

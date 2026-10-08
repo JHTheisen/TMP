@@ -103,6 +103,45 @@ class CelestialControlTests(unittest.TestCase):
         self.auto.receive("CELESTIAL_TRACK id=1", 1.1)
         self.assertEqual(self.auto.phase, "CELESTIAL_TRACK")
 
+    def test_here_and_radec_have_identical_steady_state_updates(self):
+        streams = []
+        fields = {"available": "YES", "has_sample": "YES", "fresh": "YES", "north_usable": "YES",
+                  "pitch_axis": "PITCH", "age_ms": "10", "heading": "100", "physical_pitch": "30"}
+        target = EquatorialTarget(5.25, 22.5)
+        for here in (True, False):
+            auto = AutoSession()
+            auto.configure_celestial(Observer(42, -83, 200), self.reference)
+            worker = FakeWorker()
+            auto.celestial.worker = worker
+            if here:
+                auto.request_track_here(1, True, fields, .95)
+            else:
+                auto.request_celestial("TRACK_RADEC 5.25 22.5", 1, True)
+            generation, _, requested_at = (worker.captures if here else worker.jobs)[0]
+            horizontal = HorizontalTarget(105, 30, UTC)
+            worker.results.append(Calculation(generation, requested_at, UTC, horizontal,
+                self.reference.mount_target(horizontal), target=target if here else None))
+            auto.receive("M09 READY", 1.01)
+            stream = [auto.frame(1.02)]
+            auto.receive("CELESTIAL_ACCEPTED id=1 deadline_ms=90000", 1.03)
+            auto.receive("CELESTIAL_TRACK id=1", 1.1)
+            self.assertIsNone(auto.deadline)
+            for second in range(2, 65):
+                now = second * 1.1
+                auto.receive("CELESTIAL_STATE id=1 mode=TRACK feedback=AS5600 bno=DEGRADED", now)
+                auto.frame(now)
+                generation, job_target, requested_at = worker.jobs[-1]
+                self.assertEqual(job_target, target)
+                horizontal = HorizontalTarget(105 + second * .004, 30 + second * .002, UTC)
+                worker.results.append(Calculation(generation, requested_at, UTC, horizontal,
+                    self.reference.mount_target(horizontal)))
+                stream.append(auto.frame(now + .01))
+                self.assertEqual(auto.phase, "CELESTIAL_TRACK")
+            streams.append(stream)
+            auto.close()
+        self.assertEqual(streams[0], streams[1])
+        self.assertTrue(all(command.startswith(b"CELESTIAL_UPDATE ") for command in streams[0][1:]))
+
     def test_track_here_rejects_missing_alignment_without_affecting_manual(self):
         valid = {"available": "YES", "has_sample": "YES", "fresh": "YES", "north_usable": "YES",
                  "pitch_axis": "PITCH", "age_ms": "10", "heading": "100", "physical_pitch": "30"}

@@ -97,6 +97,23 @@ int main(int argc, char **argv) {
         CHECK(simulated::commands[1].speed == 2400 && simulated::commands[1].acceleration == 2400);
         finishMove(); CHECK(pitchMotor->getCurrentPosition() == -4800);
         CHECK(millis() < 8000 && snapshot(3) == epoch);
+    } else if (scenario == "stepped") {
+        for (unsigned segment = 1; segment <= 8; ++segment) {
+            const int yaw = 20 * segment, pitch = -40 * segment, carriage = 10 * segment;
+            keymove(epoch, std::to_string(yaw) + " " + std::to_string(pitch) + " " +
+                std::to_string(carriage), 1250, segment + 1);
+            finishMove();
+            CHECK(Serial.output.find("KEYMOVE RESULT id=" + std::to_string(segment + 1) + " status=PASS") != std::string::npos);
+            CHECK(yawMotor->getCurrentPosition() == yaw && pitchMotor->getCurrentPosition() == pitch && carriageMotor->getCurrentPosition() == carriage);
+            const auto commands = simulated::commands.size();
+            // Host settle/exposure/post delay sends no movement command.
+            for (unsigned ms = 0; ms < 1500; ms += 10) {
+                advance(10); CHECK(stopped());
+                CHECK(yawMotor->getCurrentPosition() == yaw && pitchMotor->getCurrentPosition() == pitch && carriageMotor->getCurrentPosition() == carriage);
+            }
+            CHECK(simulated::commands.size() == commands);
+        }
+        CHECK(yawMotor->getCurrentPosition() == 160 && pitchMotor->getCurrentPosition() == -320 && carriageMotor->getCurrentPosition() == 80);
     } else if (scenario == "configuration") {
         simulated::accelerationFails = true; keymove(epoch);
         CHECK(simulated::commands.empty() && stopped());

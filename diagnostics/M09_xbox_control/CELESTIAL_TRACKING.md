@@ -1,5 +1,8 @@
 # Celestial TRACK rate control
 
+See [TRACK_ARCHITECTURE_AUDIT.md](TRACK_ARCHITECTURE_AUDIT.md) for the current
+feedback audit, encoder initialization, and operator additions.
+
 ## Cause of the former stop/correct cycle
 
 `beginCelestial()` admits GOTO and initializes the existing POSE axes.
@@ -55,16 +58,17 @@ and all noncelestial controllers retain their original dispatch.
    receives fractional-Hz continuous rates via `setSpeedInMilliHz()`. Updating
    speed does not restart the motor. Direction changes brake, confirm stopped,
    and wait for the existing fresh post-stop observation before reversing.
-5. The existing 3000 ms target lease, position/travel guards and STOP/abort paths
-   remain active. Extrapolated targets also obey travel guards. A filtered
-   residual exceeding the existing 0.4 degree tolerance must improve by
-   0.1 degree within 60 seconds or tracking fails safely. This replaces burst
-   progress timing only for continuous TRACK, where motion can be below one
-   pulse per second. Motor command failure/unexpected stopping also fails safely.
-6. Sensor fallback still latches only when both AS5600 axes are control-ready.
-   Otherwise motors pause and the session can resume after acceptable BNO
-   recovery and confirmed stopping. Continuous TRACK participates in that
-   braking path. No optional-sensor requirement is added to manual operation.
+5. The 3000 ms target lease, pitch guards and STOP/abort paths remain active.
+   Celestial yaw has no fixed travel envelope. Continuous TRACK checks measured
+   response to commanded motion rather than convergence to a finite target:
+   after at least 0.2 degrees of commanded travel, 60 seconds without 0.1 degrees
+   of measured forward response fails safely. Sub-hertz pauses, motor command
+   failure and unexpected stopping retain their handling. GOTO retains its
+   finite-target progress checks.
+6. TRACK latches AS5600 feedback on both axes at acquisition completion.
+   BNO recovery reports discrepancies without changing that control reference.
+   Missing/invalid/stale encoders or unknown encoder scales hold motion; BNO
+   cannot take over steady TRACK. Manual motion has no new sensor requirement.
 
 ## Startup and physical limits
 
@@ -80,7 +84,10 @@ Do not negate the magnitude constant: direction is already applied separately.
 LEVEL's separate sign selection, GOTO, yaw and manual mappings are unchanged.
 The supplied GOTO/takeover run did not demonstrate reversed TRACK motion.
 
-A fresh TRACK HERE uses configured conversions immediately upon entering TRACK.
+A fresh TRACK HERE uses configured motor conversions upon entering TRACK, but
+needs valid AS5600 feedback and a learned encoder-to-axis scale on both axes.
+An unknown scale holds motion; completed manual movement can establish it
+before retrying. These scales are distinct from configured STEP pulses/degree.
 It still needs two successive target positions to establish velocity (normally
 the first CELESTIAL_UPDATE); it never waits for a measured motor response or
 falls back to positional catch-up. GOTO and its learned deadline estimates are
@@ -92,7 +99,7 @@ At TRACK entry and every two seconds, two `CELESTIAL_RATE` lines report `axis`,
 Hz values are signed STEP rates; angular values follow the BNO axis convention.
 `commanded_hz` is the continuous command, zero while stopped/paused/braking;
 it is not a measurement of instantaneous pulses during deceleration. Correction
-uses AS5600 feedback after a qualified permanent fallback, otherwise BNO.
+uses AS5600 feedback throughout continuous TRACK.
 
 ## Provisional powered evidence (2026-10-04)
 

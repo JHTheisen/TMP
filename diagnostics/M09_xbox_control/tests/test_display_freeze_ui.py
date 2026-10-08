@@ -183,7 +183,7 @@ class DisplayFreezeUiTests(unittest.TestCase):
                                  (key(pygame.K_ESCAPE), False)):
                 with self.subTest(raw=raw, event=event):
                     result, writes, _, _, _ = self.run_ui([(1.0, [event])], raw=raw)
-                    self.assertEqual(result, int(abort))
+                    self.assertEqual(result, int(abort and event.type == pygame.KEYDOWN))
                     self.assertTrue(any(1.0 <= at < 1.03 and
                                         (data == b"X\n" if abort else b"STOP" in data) for at, data in writes))
                     self.assertFalse(any(at >= 1.0 and data.startswith(b"JOG ") for at, data in writes))

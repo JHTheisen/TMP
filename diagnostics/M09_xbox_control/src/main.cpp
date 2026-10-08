@@ -1033,6 +1033,12 @@ void sensorTelemetry() {
     const uint32_t now = millis();
     char line[850];
     const char *northReason = northUnavailableReason(now);
+    snprintf(line, sizeof(line), "BNO_INIT bus=B bus_ready=%s address=0x%02X probe4A_rc=%u probe4B_rc=%u attempts=%u/%u stage=%s initialized=%s reports=%s retry_pending=%s clock_hz=100000 wire_timeout_ms=50 transport=packet384\n",
+        sensorSnapshot.encoders.state(1).busAvailable ? "YES" : "NO", sensorSnapshot.bnoAddress,
+        sensorSnapshot.probe4A, sensorSnapshot.probe4B, sensorSnapshot.bnoAttempts, m09::BNO_STARTUP_ATTEMPTS,
+        m09::bnoInitStageText(sensorSnapshot.bnoInitStage), bnoInitialized ? "YES" : "NO",
+        reportEnabled ? "YES" : "NO", sensorSnapshot.bnoRetryPending ? "YES" : "NO");
+    queueText(line);
     snprintf(line, sizeof(line), "BNO_STATE available=%s fresh=%s age_ms=%lu accuracy=%u north_usable=%s north_reason=%s heading=%.3f physical_pitch=%.3f pitch_axis=PITCH pitch_roll=%.3f has_sample=%s accepted_seq=%u accepted_sensor_us=%llu accepted_rx_ms=%lu\n",
         bnoInitialized && reportEnabled ? "YES" : "NO", fresh(now) ? "YES" : "NO",
         static_cast<unsigned long>(hasPlausibleOrientation ? now - lastPlausibleAt : UINT32_MAX), lastPlausibleAccuracy,
@@ -1113,7 +1119,7 @@ void setup() {
     Serial.println("M09_xbox_control: manual velocity; optional AS5600/BNO telemetry; no automatic startup movement");
     Serial.println("BNO_DIAGNOSTICS revision=sensor-worker-1 comparison=POST_RELOCATION_USER_REPORTED timestamp=header_receipt_us");
     Serial.println("Yaw DIR32/STEP33; pitch DIR26/STEP12; carriage DIR21/STEP22. Physical pitch feedback = BNO PITCH.");
-    Serial.println("AS5600 Bus A SDA18/SCL19 and Bus B SDA4/SCL5 at 0x36; BNO Bus B at 0x4A.");
+    Serial.println("AS5600 Bus A SDA18/SCL19 and Bus B SDA4/SCL5 at 0x36; BNO Bus B at 0x4A or 0x4B, 100 kHz.");
     Serial.println("Manual travel is operator-supervised. Carriage steps are unhomed; no software position window.");
     Serial.println("Centered JOG arms; STOP brakes; X/x latches abort. Continuous commands expire after 250 ms.");
     engine.init();
@@ -1148,6 +1154,7 @@ void loop() {
     safety();
     if (manualActive) serviceManual(); // STOP reaches motor braking before sensor calls.
     serviceBno();
+    learnStoppedCelestialEncoderScales();
     serviceCommands(); safety();
     servicePoseStop();
     serviceKeyframe();
