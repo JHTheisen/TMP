@@ -7,6 +7,8 @@ from session_log import SessionLog
 from auto_control import AutoSession
 from operator_dashboard import OperatorDashboard
 from encoder_setup import EncoderSetup
+from control_worker import ControlWorker
+from windows_controller import safety_reader
 
 SEND_INTERVAL = 0.020
 COMMAND_TIMEOUT = 0.250  # Same command lease as the firmware; a lapse needs a new arm.
@@ -305,6 +307,7 @@ def main(argv=None):
     print(f"M09 diagnostic log: {log.path}" if log.path else "M09 diagnostic logging unavailable; see error above.")
     pygame = None
     port = None
+    worker = None
     session = ManualSession()
     auto = AutoSession()
     encoder_setup = EncoderSetup() if args.dry_run else EncoderSetup(args.yaw_encoder_ratio, args.pitch_encoder_ratio)
@@ -341,27 +344,18 @@ def main(argv=None):
             port = serial.Serial(args.port, 115200, timeout=0, write_timeout=0.1)
             log.event("SERIAL", "opened")
         log.event("CONTROLLER", f"name={joystick.get_name()} axes={joystick.get_numaxes()}")
+        worker = ControlWorker(port, session, auto, encoder_setup, log,
+                               clock=time.monotonic,
+                               safety_input=safety_reader(args.controller, args.deadband))
         def send(data, raw_command=False):
-            if raw_command:
-                # Do not parse or sample arbitrary input as a generated JOG.
-                # repr retains exact bytes, whitespace and the final newline.
-                log.event("RAW_TX_ATTEMPT", repr(data))
-            else:
-                log.transmitted(data, time.monotonic())
-            if port is not None:
-                write_started = time.monotonic()
-                written = port.write(data)
-                log.timing("serial.write", time.monotonic() - write_started)
-                if written != len(data):
-                    raise RuntimeError("Incomplete serial write")
-            if raw_command:
-                log.event("RAW_TX", repr(session.last_raw_command))
+            # Age starts at this GUI input sample, not after potentially slow
+            # command preparation/logging. Never relabel old input as fresh.
+            worker.send(data, raw_command, created_at=now)
+        lines = worker.lines
         now = time.monotonic()
         last_jog = None
-        next_send = next_status = now
+        next_send = now
         centered_since = None
-        rx = ""
-        discard_rx_line = False
         running = True
         display_frozen = False
         diagnostic_snapshot = None
@@ -376,8 +370,15 @@ def main(argv=None):
         while running:
             loop_started = time.monotonic()
             now = time.monotonic()
+            worker.synchronize()
+            text_input = None
             event_started = time.monotonic()
-            events = pygame.event.get()  # Pumps input before every read, as in v05.
+            # pygame 2.6 event.get()/pump() hold the GIL in SDL_PumpEvents.
+            # wait(timeout) releases it, including during Windows modal drags.
+            # Collect the remaining events without entering a second modal pump.
+            first_event = pygame.event.wait(1)
+            events = ([first_event] if first_event.type != pygame.NOEVENT else [])
+            events += pygame.event.get(pump=False)
             log.timing("pygame.event.get", time.monotonic() - event_started)
             now = time.monotonic()
             for event in events:
@@ -390,43 +391,6 @@ def main(argv=None):
             ui_started = time.monotonic()
             ui_actions = dashboard.handle_events(events, session.raw_mode)
             log.timing("dashboard.handle_events", time.monotonic() - ui_started)
-            was_automatic = auto.overridable
-            if port is not None:
-                rx_started = time.monotonic()
-                received = port.read(min(port.in_waiting, 4096))
-                if any(value > 127 for value in received):
-                    log.sampled("non_ascii", "PARSER", f"non-ASCII serial bytes: {received[:96]!r}", now, 0.5)
-                rx += received.decode("ascii", errors="replace")
-                if discard_rx_line and "\n" in rx:
-                    _, rx = rx.split("\n", 1)
-                    discard_rx_line = False
-                while "\n" in rx:
-                    line, rx = rx.split("\n", 1)
-                    line = line.strip()
-                    if line:
-                        log.received(line, now)
-                        session.receive(line, now)
-                        auto.receive(line, now)
-                        configuring = encoder_setup.pending
-                        encoder_setup.receive(line)
-                        if configuring and encoder_setup.phase == "done":
-                            session.readiness_note = "Encoder ratios applied. Center sticks to arm; SET NORTH and SET LEVEL required."
-                            log.event("ENCODER_SETUP", session.readiness_note)
-                        # Repeated BUSY polls must not push out the startup reason.
-                        if line != "M09 BUSY":
-                            lines = (lines + [line])[-8:]
-                if len(rx) > 8192:
-                    rx = ""
-                    discard_rx_line = True
-                    log.event("PARSER", "overlong telemetry line discarded (>8192 bytes); command stream continues")
-                    lines = (lines + ["Malformed telemetry line discarded; command stream continues."])[-8:]
-                log.timing("serial.rx_processing", time.monotonic() - rx_started)
-            if auto.consume_manual_rearm_required():
-                failure_rearm = "await_move"
-                centered_since = None
-                takeover = False
-                log.event("MANUAL_REARM", "unexpected celestial failure; waiting for a fresh stick displacement")
-            session.auto_mode = auto.busy or encoder_setup.pending
             # Read current axes after receiving status; never replay pre-pause input.
             joystick_started = time.monotonic()
             raw = [joystick.get_axis(i) for i in range(joystick.get_numaxes())]
@@ -435,370 +399,374 @@ def main(argv=None):
             pitch = stick_command(raw[args.pitch_axis], args.deadband, args.speed_scale, not args.no_invert_pitch)
             carriage = stick_command(raw[args.carriage_axis], args.deadband, args.speed_scale, True)
             now = time.monotonic()
-            centered = all(abs(raw[index]) <= args.deadband for index in (args.yaw_axis, args.pitch_axis, args.carriage_axis))
-            centered_since = (now if centered_since is None else centered_since) if centered else None
-            if failure_rearm == "await_move" and not centered:
-                failure_rearm = "await_center"
-                log.event("MANUAL_REARM", "fresh stick displacement observed; waiting for centered dwell")
-            elif (failure_rearm == "await_center" and centered_since is not None and
-                  now - centered_since >= .5):
-                failure_rearm = None
-                log.event("MANUAL_REARM", "fresh centered dwell complete; manual arming enabled")
-            if session.state in ("active", "arming") and last_jog is not None and now - last_jog >= COMMAND_TIMEOUT:
-                session.disarm("Command stream paused; center sticks and rearm.", request_stop=True)
-            def selected_button(event, button):
-                return (event.type == pygame.JOYBUTTONDOWN and
-                        event.instance_id == joystick.get_instance_id() and event.button == button)
-            def pressed(event, key):
-                return event.type == pygame.KEYDOWN and event.key == key
-            # Track physical release even outside AUTO. Holding a control across
-            # mode entry/completion cannot turn it into another request.
-            fresh_buttons = set()
-            hat_actions = {}
-            for index, event in enumerate(events):
-                if getattr(event, "instance_id", None) != joystick.get_instance_id():
-                    continue
-                if event.type == pygame.JOYBUTTONUP:
-                    held_buttons.discard(event.button)
-                    if event.button == 1:
-                        exit_hold.release()
-                        log.event("EXIT_HOLD", "B released; pending application exit canceled")
-                elif event.type == pygame.JOYBUTTONDOWN:
-                    if event.button not in held_buttons:
-                        fresh_buttons.add(index)
-                    held_buttons.add(event.button)
-                    if event.button == 1:
-                        exit_hold.press(now)
-                    input_notice = f"Controller button {event.button} down"
-                    log.event("CONTROLLER_INPUT", input_notice)
-                elif event.type == pygame.JOYHATMOTION and event.hat == args.move_hat:
-                    input_notice = f"Controller hat {event.hat}: {event.value}"
-                    log.event("CONTROLLER_INPUT", input_notice)
-                    if event.value == (0, 0):
-                        hat_neutral = True
-                    else:
-                        if hat_neutral:
-                            hat_actions[index] = {(0, 1): "pitch_up", (0, -1): "pitch_down",
-                                                  (1, 0): "yaw_right", (-1, 0): "yaw_left"}.get(event.value)
-                        hat_neutral = False
-            # Safety actions win over Enter even when queued later in the same
-            # pygame batch. No raw move should precede an already-pending stop.
-            if "abort" in ui_actions or any(pressed(event, pygame.K_x) for event in events):
-                explicit_abort = True
-                raise RuntimeError("Operator latched abort")
-            b_abort = any(selected_button(event, 1) for event in events)
-            if b_abort:
-                explicit_abort = True
-                if not args.dry_run:
-                    send(b"X\n")
-                auto.receive("M09 ABORTED", now)
-                session.receive("M09 ABORTED", now)
-                encoder_setup.receive("M09 ABORTED")
-                takeover = False
-                centered_since = last_jog = None
-                log.event("EXIT_HOLD", "B: immediate latched abort; hold continuously for 2 seconds to exit")
-            if exit_hold.ready(now):
-                log.event("EXIT_HOLD", "B held for 2 seconds; exiting application")
-                break
-            if any(event.type == pygame.QUIT or pressed(event, pygame.K_ESCAPE) for event in events):
-                break
-            toggling_raw = any(pressed(event, pygame.K_F2) for event in events)
-            safety_stop = ("stop" in ui_actions or
-                           any(pressed(event, pygame.K_F12) or pressed(event, pygame.K_SPACE) for event in events))
-            suppress_submit = safety_stop or toggling_raw or b_abort or encoder_setup.pending
-            if safety_stop:
-                takeover = False
-                centered_since = None
-                stop = session.stop_raw(now)
-                auto.cancel(now)
-                log.event("INPUT", "operator STOP; raw command submission suppressed for this input batch")
-                if not args.dry_run:
-                    send(stop)
-                else:
-                    session.raw_waiting = False
-            for index, event in enumerate(events):
-                key = event.key if event.type == pygame.KEYDOWN else None
-                if key == pygame.K_F3 and not getattr(event, "repeat", False):
-                    display_frozen = not display_frozen
-                    dashboard.toggle_diagnostics(True)
-                    log.event("DISPLAY", "frozen; controls and telemetry remain live" if display_frozen else "live; showing latest state")
-                    continue
-                if key == pygame.K_F2 and not getattr(event, "repeat", False):
-                    if encoder_setup.pending:
-                        continue
-                    dashboard.blur_editor()
-                    takeover = False
-                    auto.leave(now)
-                    session.auto_mode = True
-                    stop = session.leave_raw(now) if session.raw_mode else session.enter_raw(now)
-                    centered_since = None
+            with worker.transaction():
+                was_automatic = auto.overridable
+                if worker.native_takeover:
+                    worker.native_takeover = False
+                    takeover = True
                     last_jog = None
-                    if session.raw_mode:
-                        pygame.key.start_text_input()
-                    else:
-                        pygame.key.stop_text_input()
-                    log.event("RAW_MODE", "entered; STOP and disarm" if session.raw_mode else "left; STOP and deliberate rearm required")
+                if auto.consume_manual_rearm_required():
+                    failure_rearm = "await_move"
+                    centered_since = None
+                    takeover = False
+                    log.event("MANUAL_REARM", "unexpected celestial failure; waiting for a fresh stick displacement")
+                session.auto_mode = auto.busy or encoder_setup.pending
+                centered = all(abs(raw[index]) <= args.deadband for index in (args.yaw_axis, args.pitch_axis, args.carriage_axis))
+                centered_since = (now if centered_since is None else centered_since) if centered else None
+                if failure_rearm == "await_move" and not centered:
+                    failure_rearm = "await_center"
+                    log.event("MANUAL_REARM", "fresh stick displacement observed; waiting for centered dwell")
+                elif (failure_rearm == "await_center" and centered_since is not None and
+                      now - centered_since >= .5):
+                    failure_rearm = None
+                    log.event("MANUAL_REARM", "fresh centered dwell complete; manual arming enabled")
+                if session.state in ("active", "arming") and last_jog is not None and now - last_jog >= COMMAND_TIMEOUT:
+                    session.disarm("Command stream paused; center sticks and rearm.", request_stop=True)
+                def selected_button(event, button):
+                    return (event.type == pygame.JOYBUTTONDOWN and
+                            event.instance_id == joystick.get_instance_id() and event.button == button)
+                def pressed(event, key):
+                    return event.type == pygame.KEYDOWN and event.key == key
+                # Track physical release even outside AUTO. Holding a control across
+                # mode entry/completion cannot turn it into another request.
+                fresh_buttons = set()
+                hat_actions = {}
+                for index, event in enumerate(events):
+                    if getattr(event, "instance_id", None) != joystick.get_instance_id():
+                        continue
+                    if event.type == pygame.JOYBUTTONUP:
+                        held_buttons.discard(event.button)
+                        if event.button == 1:
+                            exit_hold.release()
+                            log.event("EXIT_HOLD", "B released; pending application exit canceled")
+                    elif event.type == pygame.JOYBUTTONDOWN:
+                        if event.button not in held_buttons:
+                            fresh_buttons.add(index)
+                        held_buttons.add(event.button)
+                        if event.button == 1:
+                            exit_hold.press(now)
+                        input_notice = f"Controller button {event.button} down"
+                        log.event("CONTROLLER_INPUT", input_notice)
+                    elif event.type == pygame.JOYHATMOTION and event.hat == args.move_hat:
+                        input_notice = f"Controller hat {event.hat}: {event.value}"
+                        log.event("CONTROLLER_INPUT", input_notice)
+                        if event.value == (0, 0):
+                            hat_neutral = True
+                        else:
+                            if hat_neutral:
+                                hat_actions[index] = {(0, 1): "pitch_up", (0, -1): "pitch_down",
+                                                      (1, 0): "yaw_right", (-1, 0): "yaw_left"}.get(event.value)
+                            hat_neutral = False
+                # Safety actions win over Enter even when queued later in the same
+                # pygame batch. No raw move should precede an already-pending stop.
+                if "abort" in ui_actions or any(pressed(event, pygame.K_x) for event in events):
+                    explicit_abort = True
+                    auto.cancel(now, "Operator latched abort")
+                    worker.abort = True
+                    worker.commands.clear()
+                    raise RuntimeError("Operator latched abort")
+                b_abort = any(selected_button(event, 1) for event in events)
+                if b_abort:
+                    explicit_abort = True
+                    if not args.dry_run:
+                        send(b"X\n")
+                    auto.receive("M09 ABORTED", now)
+                    session.receive("M09 ABORTED", now)
+                    encoder_setup.receive("M09 ABORTED")
+                    takeover = False
+                    centered_since = last_jog = None
+                    log.event("EXIT_HOLD", "B: immediate latched abort; hold continuously for 2 seconds to exit")
+                if exit_hold.ready(now):
+                    log.event("EXIT_HOLD", "B held for 2 seconds; exiting application")
+                    break
+                if any(event.type == pygame.QUIT or pressed(event, pygame.K_ESCAPE) for event in events):
+                    break
+                toggling_raw = any(pressed(event, pygame.K_F2) for event in events)
+                safety_stop = ("stop" in ui_actions or
+                               any(pressed(event, pygame.K_F12) or pressed(event, pygame.K_SPACE) for event in events))
+                suppress_submit = safety_stop or toggling_raw or b_abort or encoder_setup.pending
+                if safety_stop:
+                    takeover = False
+                    centered_since = None
+                    stop = session.stop_raw(now)
+                    auto.cancel(now)
+                    log.event("INPUT", "operator STOP; raw command submission suppressed for this input batch")
                     if not args.dry_run:
                         send(stop)
                     else:
                         session.raw_waiting = False
-                    continue
-                if session.raw_mode:
-                    if key == pygame.K_TAB:
-                        session.raw_text += " "  # Keep Space reserved for STOP in every mode.
-                    elif key == pygame.K_BACKSPACE:
-                        session.raw_text = session.raw_text[:-1]
-                    elif key in (pygame.K_RETURN, pygame.K_KP_ENTER) and not suppress_submit:
-                        try:
-                            command = session.raw_text
-                            words = command.split()
-                            verb = words[0].upper() if words else ""
-                            celestial_request = verb == "TRACK_RADEC"
-                            if celestial_request:
-                                if session.raw_waiting or session.pending_stop:
-                                    raise ValueError("Waiting for READY after STOP; press Enter again when ready. Nothing queued.")
-                                data = auto.request_celestial(command, now,
+                for index, event in enumerate(events):
+                    key = event.key if event.type == pygame.KEYDOWN else None
+                    if key == pygame.K_F3 and not getattr(event, "repeat", False):
+                        display_frozen = not display_frozen
+                        dashboard.toggle_diagnostics(True)
+                        log.event("DISPLAY", "frozen; controls and telemetry remain live" if display_frozen else "live; showing latest state")
+                        continue
+                    if key == pygame.K_F2 and not getattr(event, "repeat", False):
+                        if encoder_setup.pending:
+                            continue
+                        dashboard.blur_editor()
+                        takeover = False
+                        auto.leave(now)
+                        session.auto_mode = True
+                        stop = session.leave_raw(now) if session.raw_mode else session.enter_raw(now)
+                        centered_since = None
+                        last_jog = None
+                        if session.raw_mode:
+                            text_input = True
+                        else:
+                            text_input = False
+                        log.event("RAW_MODE", "entered; STOP and disarm" if session.raw_mode else "left; STOP and deliberate rearm required")
+                        if not args.dry_run:
+                            send(stop)
+                        else:
+                            session.raw_waiting = False
+                        continue
+                    if session.raw_mode:
+                        if key == pygame.K_TAB:
+                            session.raw_text += " "  # Keep Space reserved for STOP in every mode.
+                        elif key == pygame.K_BACKSPACE:
+                            session.raw_text = session.raw_text[:-1]
+                        elif key in (pygame.K_RETURN, pygame.K_KP_ENTER) and not suppress_submit:
+                            try:
+                                command = session.raw_text
+                                words = command.split()
+                                verb = words[0].upper() if words else ""
+                                celestial_request = verb == "TRACK_RADEC"
+                                if celestial_request:
+                                    if session.raw_waiting or session.pending_stop:
+                                        raise ValueError("Waiting for READY after STOP; press Enter again when ready. Nothing queued.")
+                                    data = auto.request_celestial(command, now,
+                                        centered_since is not None and now - centered_since >= .5,
+                                        dry_run=args.dry_run)
+                                    session.last_raw_command = command
+                                    session.raw_text = ""
+                                    if not args.dry_run:
+                                        # F2 is only the entry surface for this
+                                        # host-managed workflow. Once accepted
+                                        # locally, leave raw mode so every terminal
+                                        # celestial path returns to ordinary manual
+                                        # readiness. The returned STOP below is the
+                                        # one already prepared by AutoSession.
+                                        session.leave_raw(now)
+                                        text_input = False
+                                        session.auto_mode = True
+                                        last_jog = centered_since = None
+                                        takeover = False
+                                elif verb.startswith("CELESTIAL") or verb in ("TRACK_BEGIN", "TRACK_SET"):
+                                    raise ValueError("Use TRACK_RADEC <RA hours> <Dec degrees>; celestial motion protocol is host-managed.")
+                                else:
+                                    if auto.action == "celestial" and verb not in ("STOP", "STATUS", "X"):
+                                        raise ValueError("Celestial motion active; STOP before sending another raw command.")
+                                    if auto.action == "celestial" and verb in ("STOP", "STATUS") and words[0] != verb:
+                                        raise ValueError(f"Firmware commands are case-sensitive; use uppercase {verb}.")
+                                    if auto.action == "celestial" and verb in ("STOP", "STATUS") and len(words) != 1:
+                                        raise ValueError(f"Use {verb} without arguments.")
+                                    data = session.submit_raw()
+                            except ValueError as error:
+                                notice = str(error)
+                                log.event("RAW_NOT_SENT", notice)
+                                lines[:] = (lines + [notice])[-8:]
+                            else:
+                                if args.dry_run:
+                                    log.event("RAW_DRY_RUN", repr(data))
+                                elif celestial_request:
+                                    log.event("CELESTIAL_REQUEST", session.last_raw_command)
+                                    if data is not None:
+                                        send(data)
+                                else:
+                                    send(data, raw_command=True)
+                                    auto.raw_sent(session.last_raw_command, now)
+                                label = "CELESTIAL REQUEST" if celestial_request else "RAW TX"
+                                echo = f"{'RAW DRY RUN' if args.dry_run else label}: {session.last_raw_command!r}"
+                                print(echo)
+                                lines[:] = (lines + [echo])[-8:]
+                        elif event.type == pygame.TEXTINPUT and event.text != " ":
+                            # Only explicit editor text is accepted, never KEYDOWN
+                            # unicode or joystick buttons. Keep input a single line.
+                            session.raw_text += "".join(character for character in event.text if character.isprintable())
+                        continue
+                    if auto.enabled:
+                        if suppress_submit:
+                            continue
+                        action = hat_actions.get(index)
+                        if index in fresh_buttons:
+                            if event.button == args.increment_button:
+                                auto.increment = 2 if auto.increment == 1 else 1
+                            elif event.button == args.duration_button:
+                                if auto.phase == "READY":
+                                    auto.duration = {5: 10, 10: 20, 20: 5}[auto.duration]
+                            else:
+                                action = {args.capture_a_button: "capture_a", args.capture_b_button: "capture_b",
+                                          args.return_a_button: "return_a", args.play_button: "play",
+                                          args.level_button: "level", args.north_button: "north"}.get(event.button)
+                        if action:
+                            data = auto.request(action, now, centered_since is not None and now - centered_since >= 0.5)
+                            if data is not None:
+                                session.stop_raw(now)
+                                session.auto_mode = True
+                                last_jog = None
+                                centered_since = None
+                                takeover = False
+                                log.event("AUTO_TX", repr(data))
+                                if args.dry_run:
+                                    print(f"AUTO DRY RUN: {data!r}")
+                                    auto.cancel(now, "Dry run: no firmware response or movement; captures require firmware.")
+                                    auto.receive("M09 READY", now)
+                                else:
+                                    send(data)
+                            else:
+                                log.event("AUTO_NOT_SENT", auto.note)
+                        continue
+                if not session.raw_mode and not suppress_submit:
+                    # GUI buttons use the exact same AutoSession request paths as
+                    # their existing gamepad equivalents. No motion policy lives
+                    # in the dashboard.
+                    for action in ui_actions:
+                        if action in ("stop", "abort", "diagnostics"):
+                            continue
+                        if action in ("track", "track_selected"):
+                            try:
+                                command = (dashboard.selected_target(now) if action == "track_selected" else
+                                           dashboard.celestial_command())
+                                data = auto.request_celestial(
+                                    command, now,
                                     centered_since is not None and now - centered_since >= .5,
                                     dry_run=args.dry_run)
-                                session.last_raw_command = command
-                                session.raw_text = ""
-                                if not args.dry_run:
-                                    # F2 is only the entry surface for this
-                                    # host-managed workflow. Once accepted
-                                    # locally, leave raw mode so every terminal
-                                    # celestial path returns to ordinary manual
-                                    # readiness. The returned STOP below is the
-                                    # one already prepared by AutoSession.
-                                    session.leave_raw(now)
-                                    pygame.key.stop_text_input()
+                                session.last_raw_command = command if isinstance(command, str) else command.describe()
+                            except ValueError as error:
+                                notice = str(error)
+                                dashboard.notice = notice
+                                log.event("CELESTIAL_NOT_SENT", notice)
+                                lines[:] = (lines + [notice])[-8:]
+                            else:
+                                dashboard.show_targets = False
+                                dashboard.notice = "Celestial request accepted by host."
+                                log.event("CELESTIAL_REQUEST", session.last_raw_command)
+                                if args.dry_run:
+                                    print(f"AUTO DRY RUN: {command!r}")
+                                elif data is not None:
+                                    session.stop_raw(now)
                                     session.auto_mode = True
                                     last_jog = centered_since = None
                                     takeover = False
-                            elif verb.startswith("CELESTIAL") or verb in ("TRACK_BEGIN", "TRACK_SET"):
-                                raise ValueError("Use TRACK_RADEC <RA hours> <Dec degrees>; celestial motion protocol is host-managed.")
+                                    send(data)
+                            continue
+                        if action == "track_here":
+                            try:
+                                data = auto.request_track_here(
+                                    now, centered_since is not None and now - centered_since >= .5,
+                                    session.sensor_fields, session.sensor_status_at, dry_run=args.dry_run)
+                            except ValueError as error:
+                                notice = str(error)
+                                dashboard.notice = notice
+                                log.event("CELESTIAL_NOT_SENT", notice)
+                                lines[:] = (lines + [notice])[-8:]
                             else:
-                                if auto.action == "celestial" and verb not in ("STOP", "STATUS", "X"):
-                                    raise ValueError("Celestial motion active; STOP before sending another raw command.")
-                                if auto.action == "celestial" and verb in ("STOP", "STATUS") and words[0] != verb:
-                                    raise ValueError(f"Firmware commands are case-sensitive; use uppercase {verb}.")
-                                if auto.action == "celestial" and verb in ("STOP", "STATUS") and len(words) != 1:
-                                    raise ValueError(f"Use {verb} without arguments.")
-                                data = session.submit_raw()
-                        except ValueError as error:
-                            notice = str(error)
-                            log.event("RAW_NOT_SENT", notice)
-                            lines = (lines + [notice])[-8:]
-                        else:
-                            if args.dry_run:
-                                log.event("RAW_DRY_RUN", repr(data))
-                            elif celestial_request:
-                                log.event("CELESTIAL_REQUEST", session.last_raw_command)
-                                if data is not None:
+                                dashboard.notice = "Current pointing captured for celestial tracking."
+                                log.event("CELESTIAL_REQUEST", auto.celestial_status)
+                                if args.dry_run:
+                                    print("AUTO DRY RUN: TRACK HERE")
+                                elif data is not None:
+                                    session.stop_raw(now)
+                                    session.auto_mode = True
+                                    last_jog = centered_since = None
+                                    takeover = False
+                                    send(data)
+                            continue
+                        if action in ("set_north", "set_level", "level", "north", "capture_a", "capture_b", "return_a", "play", "play_stepped"):
+                            if action == "play_stepped":
+                                try:
+                                    auto.photo_settings = dashboard.photo_settings()
+                                except ValueError as error:
+                                    dashboard.notice = str(error)
+                                    continue
+                            data = auto.request(action, now, centered_since is not None and now - centered_since >= .5)
+                            if data is not None:
+                                dashboard.show_photo = False
+                                session.stop_raw(now)
+                                session.auto_mode = True
+                                last_jog = centered_since = None
+                                takeover = False
+                                log.event("AUTO_TX", repr(data))
+                                if args.dry_run:
+                                    print(f"AUTO DRY RUN: {data!r}")
+                                    auto.cancel(now, "Dry run: no firmware response or movement; captures require firmware.")
+                                    auto.receive("M09 READY", now)
+                                else:
                                     send(data)
                             else:
-                                send(data, raw_command=True)
-                                auto.raw_sent(session.last_raw_command, now)
-                            label = "CELESTIAL REQUEST" if celestial_request else "RAW TX"
-                            echo = f"{'RAW DRY RUN' if args.dry_run else label}: {session.last_raw_command!r}"
-                            print(echo)
-                            lines = (lines + [echo])[-8:]
-                    elif event.type == pygame.TEXTINPUT and event.text != " ":
-                        # Only explicit editor text is accepted, never KEYDOWN
-                        # unicode or joystick buttons. Keep input a single line.
-                        session.raw_text += "".join(character for character in event.text if character.isprintable())
-                    continue
-                if auto.enabled:
-                    if suppress_submit:
-                        continue
-                    action = hat_actions.get(index)
-                    if index in fresh_buttons:
-                        if event.button == args.increment_button:
-                            auto.increment = 2 if auto.increment == 1 else 1
-                        elif event.button == args.duration_button:
-                            if auto.phase == "READY":
-                                auto.duration = {5: 10, 10: 20, 20: 5}[auto.duration]
-                        else:
-                            action = {args.capture_a_button: "capture_a", args.capture_b_button: "capture_b",
-                                      args.return_a_button: "return_a", args.play_button: "play",
-                                      args.level_button: "level", args.north_button: "north"}.get(event.button)
-                    if action:
-                        data = auto.request(action, now, centered_since is not None and now - centered_since >= 0.5)
-                        if data is not None:
-                            session.stop_raw(now)
-                            session.auto_mode = True
-                            last_jog = None
-                            centered_since = None
-                            takeover = False
-                            log.event("AUTO_TX", repr(data))
-                            if args.dry_run:
-                                print(f"AUTO DRY RUN: {data!r}")
-                                auto.cancel(now, "Dry run: no firmware response or movement; captures require firmware.")
-                                auto.receive("M09 READY", now)
-                            else:
-                                send(data)
-                        else:
-                            log.event("AUTO_NOT_SENT", auto.note)
-                    continue
-            if not session.raw_mode and not suppress_submit:
-                # GUI buttons use the exact same AutoSession request paths as
-                # their existing gamepad equivalents. No motion policy lives
-                # in the dashboard.
-                for action in ui_actions:
-                    if action in ("stop", "abort", "diagnostics"):
-                        continue
-                    if action in ("track", "track_selected"):
-                        try:
-                            command = (dashboard.selected_target(now) if action == "track_selected" else
-                                       dashboard.celestial_command())
-                            data = auto.request_celestial(
-                                command, now,
-                                centered_since is not None and now - centered_since >= .5,
-                                dry_run=args.dry_run)
-                            session.last_raw_command = command if isinstance(command, str) else command.describe()
-                        except ValueError as error:
-                            notice = str(error)
-                            dashboard.notice = notice
-                            log.event("CELESTIAL_NOT_SENT", notice)
-                            lines = (lines + [notice])[-8:]
-                        else:
-                            dashboard.show_targets = False
-                            dashboard.notice = "Celestial request accepted by host."
-                            log.event("CELESTIAL_REQUEST", session.last_raw_command)
-                            if args.dry_run:
-                                print(f"AUTO DRY RUN: {command!r}")
-                            elif data is not None:
-                                session.stop_raw(now)
-                                session.auto_mode = True
-                                last_jog = centered_since = None
-                                takeover = False
-                                send(data)
-                        continue
-                    if action == "track_here":
-                        try:
-                            data = auto.request_track_here(
-                                now, centered_since is not None and now - centered_since >= .5,
-                                session.sensor_fields, session.sensor_status_at, dry_run=args.dry_run)
-                        except ValueError as error:
-                            notice = str(error)
-                            dashboard.notice = notice
-                            log.event("CELESTIAL_NOT_SENT", notice)
-                            lines = (lines + [notice])[-8:]
-                        else:
-                            dashboard.notice = "Current pointing captured for celestial tracking."
-                            log.event("CELESTIAL_REQUEST", auto.celestial_status)
-                            if args.dry_run:
-                                print("AUTO DRY RUN: TRACK HERE")
-                            elif data is not None:
-                                session.stop_raw(now)
-                                session.auto_mode = True
-                                last_jog = centered_since = None
-                                takeover = False
-                                send(data)
-                        continue
-                    if action in ("set_north", "set_level", "level", "north", "capture_a", "capture_b", "return_a", "play", "play_stepped"):
-                        if action == "play_stepped":
-                            try:
-                                auto.photo_settings = dashboard.photo_settings()
-                            except ValueError as error:
-                                dashboard.notice = str(error)
-                                continue
-                        data = auto.request(action, now, centered_since is not None and now - centered_since >= .5)
-                        if data is not None:
-                            dashboard.show_photo = False
-                            session.stop_raw(now)
-                            session.auto_mode = True
-                            last_jog = centered_since = None
-                            takeover = False
-                            log.event("AUTO_TX", repr(data))
-                            if args.dry_run:
-                                print(f"AUTO DRY RUN: {data!r}")
-                                auto.cancel(now, "Dry run: no firmware response or movement; captures require firmware.")
-                                auto.receive("M09 READY", now)
-                            else:
-                                send(data)
-                        else:
-                            log.event("AUTO_NOT_SENT", auto.note)
-            # A deliberate stick displacement cancels the entire sequence before
-            # any prepared follow-up can be sent. Wait for STOP/READY and the zero
-            # JOG acknowledgment, then use only the current live stick value.
-            if (not suppress_submit and not centered and
-                    (auto.overridable or (was_automatic and auto.phase == "READY"))):
-                if session.raw_mode:
-                    # Explicit manual intervention leaves an executing raw motion,
-                    # using the same STOP/READY/zero-JOG handoff as button actions.
-                    session.raw_mode = session.raw_waiting = False
-                    pygame.key.stop_text_input()
-                stop = session.stop_raw(now)
-                if not args.dry_run:
-                    send(stop)
-                auto.cancel(now, "Joystick takeover: braking, then manual JOG.")
-                takeover = True
-                last_jog = None
-            session.auto_mode = auto.busy or encoder_setup.pending
-            if encoder_setup.pending:
-                centered_since = last_jog = None
-                session.readiness_note = "Applying encoder ratios; waiting for stopped READY and confirmation."
-                configuration = encoder_setup.frame(now)
-                if configuration is not None:
-                    send(configuration)
-            if not session.raw_mode and not auto.busy and not suppress_submit and now >= next_send:
-                centered_ready = centered_since is not None and now - centered_since >= .5
-                if (failure_rearm is None or takeover) and session.arm(now, takeover or centered_ready):
+                                log.event("AUTO_NOT_SENT", auto.note)
+                # A deliberate stick displacement cancels the entire sequence before
+                # any prepared follow-up can be sent. Wait for STOP/READY and the zero
+                # JOG acknowledgment, then use only the current live stick value.
+                if (not suppress_submit and not centered and
+                        (auto.overridable or (was_automatic and auto.phase == "READY"))):
+                    if session.raw_mode:
+                        # Explicit manual intervention leaves an executing raw motion,
+                        # using the same STOP/READY/zero-JOG handoff as button actions.
+                        session.raw_mode = session.raw_waiting = False
+                        text_input = False
+                    stop = session.stop_raw(now)
+                    if not args.dry_run:
+                        send(stop)
+                    auto.cancel(now, "Joystick takeover: braking, then manual JOG.")
+                    takeover = True
                     last_jog = None
-                    failure_rearm = None
+                session.auto_mode = auto.busy or encoder_setup.pending
+                if encoder_setup.pending:
+                    centered_since = last_jog = None
+                    session.readiness_note = "Applying encoder ratios; waiting for stopped READY and confirmation."
+                if not session.raw_mode and not auto.busy and not suppress_submit and now >= next_send:
+                    centered_ready = centered_since is not None and now - centered_since >= .5
+                    if (failure_rearm is None or takeover) and session.arm(now, takeover or centered_ready):
+                        last_jog = None
+                        failure_rearm = None
+                        takeover = False
+                if session.pending_stop:
                     takeover = False
-            if session.pending_stop:
-                takeover = False
-            if now >= next_send:
-                if not args.dry_run:
-                    frame = session.frame(now, yaw, pitch, carriage)
-                    if frame:
-                        if frame == b"STOP\n" and auto.enabled:
-                            auto.cancel(now)
-                        send(frame)
-                        if frame.startswith(b"JOG "):
-                            last_jog = now
-                next_send = now + SEND_INTERVAL  # No catch-up bursts of old input.
-            if auto.enabled and not suppress_submit and not args.dry_run:
-                auto_started = time.monotonic()
-                try:
-                    command = auto.frame(now)
-                finally:
-                    log.timing("AutoSession.frame", time.monotonic() - auto_started)
-                if command is not None:
-                    log.event("AUTO_TX", repr(command))
-                    send(command)
-                for event in auto.take_camera_events():
-                    log.event("CAMERA_TRIGGER", f"segment={event.segment}/{event.segments} epoch={event.epoch} steps={event.steps} at={event.requested_at:.3f} hook=EVENT_ONLY")
-            if port is not None and now >= next_status:
-                send(b"STATUS\n")
-                next_status = now + 0.5
-            if auto.action == "celestial":
-                log.sampled("celestial", "CELESTIAL", " | ".join(auto.celestial_display_lines()),
-                            now, 1.0, auto.phase)
-            elif auto.celestial_status and celestial_last_status != (auto.phase, auto.note):
-                log.event("CELESTIAL", f"{auto.phase}: {auto.note}")
-            celestial_last_status = (auto.phase, auto.note)
-            log.state(session)
-            if args.dry_run:
-                log.sampled("dry_input", "INPUT_ONLY", f"yaw={yaw} pitch={pitch} carriage={carriage} raw={raw}", now, 0.5)
-            # Cache only presentation text. Protocol state, RX/logging, joystick
-            # processing and the raw-command editor above always remain live.
-            if not display_frozen or diagnostic_snapshot is None:
-                diagnostic_snapshot = session.diagnostic_lines(now) + [""] if not args.dry_run else []
-                response_snapshot = list(lines)
+                if now >= next_send:
+                    if not args.dry_run:
+                        frame = session.frame(now, yaw, pitch, carriage)
+                        if frame:
+                            if frame == b"STOP\n" and auto.enabled:
+                                auto.cancel(now)
+                            send(frame)
+                            if frame.startswith(b"JOG "):
+                                last_jog = now
+                    next_send = now + SEND_INTERVAL  # No catch-up bursts of old input.
+                if auto.action == "celestial":
+                    log.sampled("celestial", "CELESTIAL", " | ".join(auto.celestial_display_lines()),
+                                now, 1.0, auto.phase)
+                elif auto.celestial_status and celestial_last_status != (auto.phase, auto.note):
+                    log.event("CELESTIAL", f"{auto.phase}: {auto.note}")
+                celestial_last_status = (auto.phase, auto.note)
+                log.state(session)
+                if args.dry_run:
+                    log.sampled("dry_input", "INPUT_ONLY", f"yaw={yaw} pitch={pitch} carriage={carriage} raw={raw}", now, 0.5)
+                # Cache only presentation text. Protocol state, RX/logging, joystick
+                # processing and the raw-command editor above always remain live.
+                if not display_frozen or diagnostic_snapshot is None:
+                    diagnostic_snapshot = session.diagnostic_lines(now) + [""] if not args.dry_run else []
+                    response_snapshot = list(lines)
+                display_session, display_auto, auto_lines = worker.snapshots()
+            worker.synchronize()
+            if text_input is True:
+                pygame.key.start_text_input()
+            elif text_input is False:
+                pygame.key.stop_text_input()
             draw_started = time.monotonic()
             try:
                 dashboard.draw(
-                    screen, now=now, session=session, auto=auto,
+                    screen, now=now, session=display_session, auto=display_auto,
                     joystick_name=joystick.get_name(),
-                    serial_label="DRY RUN - CLOSED" if args.dry_run else f"{args.port} | {session.state.upper()}",
+                    serial_label="DRY RUN - CLOSED" if args.dry_run else f"{args.port} | {display_session.state.upper()}",
                     yaw=yaw, pitch=pitch, carriage=carriage, centered=centered,
                     raw_axes=raw, input_notice=(f"B abort sent. Exit in {max(0, 2 - (now - exit_hold.started)):.1f}s; release to keep dashboard open."
                                                if exit_hold.started is not None else dashboard.notice or input_notice),
                     log_label=(log.path.name if log.path else "UNAVAILABLE"),
                     display_frozen=display_frozen,
-                    diagnostic_lines=(diagnostic_snapshot + auto.display_lines()),
+                    diagnostic_lines=(diagnostic_snapshot + auto_lines),
                     response_lines=response_snapshot)
             finally:
                 log.timing("dashboard.draw", time.monotonic() - draw_started)
@@ -815,23 +783,14 @@ def main(argv=None):
         log.exception("Python controller stopped")
         print(f"Stopped: {error}")
     finally:
-        if port is not None:
+        if worker is not None:
             try:
-                # Only an explicit operator abort latches the firmware. The
-                # command lease also covers failed writes or a disconnected link.
-                if explicit_abort:
-                    log.transmitted(b"X\n", time.monotonic())
-                    port.write(b"X\n")
-                else:
-                    log.transmitted(b"\nSTOP\n", time.monotonic())
-                    port.write(b"\nSTOP\n")
+                worker.close(explicit_abort)
             except Exception:
-                log.exception("Serial stop/abort write failed during cleanup")
-            try:
-                port.close()
-                log.event("SERIAL", "closed")
-            except Exception:
-                log.exception("Serial close failed")
+                failed = True
+                log.exception("Communications cleanup failed")
+        elif port is not None:
+            port.close()  # Worker creation failed before any motion was submitted.
         auto.close()  # Invalidates optional astronomy work without waiting for its thread.
         if pygame is not None:
             try:

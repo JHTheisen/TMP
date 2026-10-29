@@ -6,7 +6,10 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time as wall_time
+import threading
 import unittest
+from host_test_support import assert_stream_equivalent
 from unittest import mock
 
 os.environ["SDL_VIDEODRIVER"] = "dummy"
@@ -56,20 +59,35 @@ class CelestialUiTests(unittest.TestCase):
             [(1.8, invalid), (1.4, submit()), (2.0, disconnected), (2.6, stale)],
             until=4.6, real_session=True)
         self.assertEqual(result, 0)
-        self.assertEqual(writes, baseline[1])
+        assert_stream_equivalent(self, writes, baseline[1])
         self.assertEqual(auto.phase, "CELESTIAL_TRACK")
         self.assertTrue(any(data.startswith(b"CELESTIAL_UPDATE ") for _, data in writes))
         self.assertIn("UNAVAILABLE", rows)
         self.assertIn("STALE", rows)
 
     def run_ui(self, actions=(), *, until=3.0, dry_run=False, config=None,
-               real_session=False, worker_error=None, gui_entry=False, orientation=True):
+               real_session=False, worker_error=None, gui_entry=False, orientation=True, gui_stall=None):
         class Clock:
-            now = 0.0
+            lock = threading.RLock()
+            base = 0.0
+            stall_started = None
+            stalled = False
+            @property
+            def now(self):
+                with self.lock:
+                    return self.base + (wall_time.monotonic() - self.stall_started if self.stall_started else 0)
             def monotonic(self):
                 return self.now
             def sleep(self, amount):
-                self.now += amount
+                with self.lock:
+                    self.base += amount
+            def stall(self, duration):
+                self.stalled = True
+                self.stall_started = wall_time.monotonic()
+                wall_time.sleep(duration)  # No GUI/main-loop calls during this interval.
+                with self.lock:
+                    self.base = self.now
+                    self.stall_started = None
 
         clock = Clock()
         writes, requests, rendered = [], [], []
@@ -202,7 +220,10 @@ class CelestialUiTests(unittest.TestCase):
         schedule = sorted(initial + list(actions), key=lambda action: action[0])
         sent = set()
 
-        def events():
+        def events(*, pump=False):
+            self.assertFalse(pump)
+            if gui_stall and not clock.stalled and clock.now >= gui_stall[0]:
+                clock.stall(gui_stall[1])
             values = []
             if port.track_at is not None and clock.now >= port.track_at:
                 port.track_at = None
@@ -231,6 +252,7 @@ class CelestialUiTests(unittest.TestCase):
         if config is None:
             config = ["--latitude", "40", "--longitude", "-75"]
         with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stdout(io.StringIO()), \
+             mock.patch.object(xbox_control, "safety_reader", return_value=None), \
              mock.patch.object(pygame.joystick, "get_count", return_value=1), \
              mock.patch.object(pygame.joystick, "Joystick", return_value=joystick), \
              mock.patch.object(pygame.event, "get", side_effect=events), \
@@ -248,6 +270,20 @@ class CelestialUiTests(unittest.TestCase):
             self.assertTrue(port.closed)
         self.assertFalse(any(data.startswith(b"TRACK_RADEC") for _, data in writes))
         return result, writes, requests, session, auto, rendered, log
+
+    def test_modal_event_pump_stall_longer_than_firmware_lease_keeps_tracking(self):
+        result, writes, _, _, auto, _, log = self.run_ui(
+            [(1.4, submit())], real_session=True, until=6.5, gui_stall=(2.7, 3.3))
+        self.assertEqual(result, 0)
+        self.assertEqual(auto.phase, "CELESTIAL_TRACK")
+        updates = [(at, data) for at, data in writes if data.startswith(b"CELESTIAL_UPDATE ")]
+        during = [(at, data) for at, data in updates if 2.8 < at < 5.9]
+        self.assertGreaterEqual(len(during), 3)
+        self.assertEqual(len({data for _, data in during}), len(during))
+        self.assertLess(max(b[0]-a[0] for a, b in zip(updates, updates[1:])), 1.5)
+        self.assertFalse(any(2.8 < at < 5.9 and data.strip() in (b"STOP", b"X") for at, data in writes))
+        duration = float(log.split("operation=pygame.event.get elapsed_ms=")[1].split()[0])
+        self.assertGreater(duration, 3000)  # Windows monotonic timestamps may be quantized.
 
     def test_host_command_and_live_status_during_goto_and_track(self):
         result, writes, requests, session, auto, rows, log = self.run_ui([(1.4, submit())])
@@ -296,7 +332,7 @@ class CelestialUiTests(unittest.TestCase):
         result, writes, _, session, auto, _, log = self.run_ui(
             [(1.4, submit()), (2.5, focus), (3.0, regain)], until=4.2, real_session=True)
         self.assertEqual(result, 0)
-        self.assertEqual(writes, baseline[1])
+        assert_stream_equivalent(self, writes, baseline[1])
         self.assertEqual(auto.phase, "CELESTIAL_TRACK")
         self.assertTrue(session.auto_mode)
         self.assertIn("focus lost; controller mode unchanged", log)
@@ -309,7 +345,7 @@ class CelestialUiTests(unittest.TestCase):
             [(1.4, submit()), (2.4, [click((997, 532))]), (2.7, [click((997, 69))])],
             until=3.6, real_session=True)
         self.assertEqual(result, 0)
-        self.assertEqual(writes, baseline[1])
+        assert_stream_equivalent(self, writes, baseline[1])
         self.assertEqual(auto.phase, "CELESTIAL_TRACK")
         self.assertTrue(any("Diagnostics" in row for row in rows))
 

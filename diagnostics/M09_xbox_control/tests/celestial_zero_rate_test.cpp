@@ -45,7 +45,7 @@ int main(int argc, char **argv) {
     simulated::latchIdleForceStop = true; simulated::forceStopDrainMs = 20;
     Wire.encoder.present = Wire1.encoder.present = true;
     setup(); advance(2200); begin();
-    simulated::motors[0].physicalSign = simulated::motors[1].physicalSign = 1;
+    simulated::motors[0].physicalSign = -1; simulated::motors[1].physicalSign = 1;
     simulated::motors[0].stepPauses = true;
     simulated::motors[0].degreesPerStep = 1.0 / YAW_TRACK_PULSES_PER_DEG;
     const bool positive = scenario == "positive_zero_negative";

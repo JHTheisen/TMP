@@ -1,8 +1,20 @@
 # Encoder direction regression — 2026-10-08
 
+**2026-10-28: the yaw polarity below is historical and superseded for the current
+mount.** The latest powered log establishes negative FAS steps increasing yaw.
+See [current yaw investigation and verification](YAW_DIRECTION_FIX_20261028.md).
+Pitch polarity and the signed pitch scale remain unchanged.
+
 Evidence: `logs/m09_20261008T142253.543658Z_28016_0.log` (existing local log,
 not a new hardware run). No upload, motor command, commit or push was performed
 while making this fix.
+
+**2026-10-12 update:** the operator has now verified that physically raising the
+camera decreases raw pitch counts. The launcher therefore uses pitch ratio
+`-0.06666667`. The motor-to-raw-count polarity established below remains +1;
+composing it with the negative pitch scale gives automatic pitch step sign -1.
+The October 8 positive-scale discussion below is historical, not the current
+mount configuration. See [current fix and checks](PITCH_AND_GUI_TRACKING_FIX.md).
 
 ## Diagnosis and full direction path
 
@@ -88,7 +100,7 @@ The complete Python suite also passed all 236 tests; evidence:
 
 ## Brief supervised hardware check (after an operator-controlled upload)
 
-1. Start the batch file with yaw ratio `1`, pitch `0.06666667`. Confirm fresh
+1. Start the batch file with yaw ratio `1`, pitch `-0.06666667`. Confirm fresh
    encoders. Jog small known movements: clockwise yaw viewed from above must
    increase calibrated yaw, and raising the camera must increase pitch. If this
    physical convention disagrees, stop and resolve that axis's encoder scale

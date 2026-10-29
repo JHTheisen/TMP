@@ -24,7 +24,9 @@ Positive calibrated yaw is clockwise looking down on the mount; positive pitch
 raises the camera. See the [direction regression and checks](audit/ENCODER_DIRECTION_FIX.md).
 
 **Mounting matters:** the pitch encoder is before reduction. The operator-supplied
-ratios are yaw 1:1 and pitch 0.06666667 output turns per encoder turn (about 1:15).
+ratios are yaw +1 and pitch **-0.06666667** output turns per encoder turn (about 1:15).
+The observed pitch mounting makes raw counts increase downward; the negative
+scale makes both measured pitch and automatic correction up-positive.
 These are configured in `Start_Gimbal.bat`; verify their direction signs on the
 mount. No encoder ratio or direction is inferred from motor counts. See
 [calibration](CELESTIAL.md). A shaft encoder measures
@@ -35,7 +37,7 @@ shaft motion, so downstream backlash, slip and flex cannot be observed by it.
 Use Python 3.11+ and install `requirements.txt` into its environment. Run:
 
 ```powershell
-python xbox_control.py --port COM9 --latitude 43.9425 --longitude -86.0394 --north-reference true
+python xbox_control.py --port COM9 --latitude 43.9425 --longitude -86.0394 --north-reference true --yaw-encoder-ratio 1 --pitch-encoder-ratio -0.06666667
 ```
 
 Use your actual observing location. The existing `Start_Gimbal.bat` uses the
@@ -68,6 +70,13 @@ Xbox defaults: A/0 LEVEL, Y/3 NORTH, LB/4 capture A, RB/5 capture B, X/2 duratio
 Home/10 play A to B, button 8 return A, button 9 increment, D-pad relative angles.
 B/1 is immediate latched abort. Space/F12 STOP; F2 raw console; F3 freezes only
 diagnostic displays. Window focus loss does not cancel autonomous operation.
+Serial I/O, target calculation servicing and STATUS polling run on one dedicated
+communications worker. SDL event waiting releases Python's interpreter lock;
+event handling and drawing hold no communications lock. Windows Xbox B-abort and
+thumbstick takeover are also polled through XInput without waiting for SDL.
+Ordinary GUI pauses stop stale manual JOG, while healthy celestial updates continue.
+The ESP32's 3000 ms celestial lease and the host's telemetry timeout remain active.
+See [implementation, tests and physical checks](audit/PITCH_AND_GUI_TRACKING_FIX.md).
 Mappings remain configurable through command-line options; use dry run to verify
 your controller's indices. Manual rates retain yaw/carriage 2000 and pitch 2400
 pulses/s ceilings and their existing acceleration limits.

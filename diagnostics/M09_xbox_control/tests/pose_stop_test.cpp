@@ -56,7 +56,7 @@ int main(int argc, char **argv) {
     Wire.encoder.present = Wire1.encoder.present = true;
     simulated::encoderPlantFeedback = true;
     setup(); advance(200);
-    simulated::motors[0].physicalSign = simulated::motors[1].physicalSign = 1;
+    simulated::motors[0].physicalSign = -1; simulated::motors[1].physicalSign = 1;
     encoderReferences[0].configure(360 * simulated::motors[0].degreesPerStep / .18);
     encoderReferences[1].configure(360 * simulated::motors[1].degreesPerStep / .225);
     CHECK(encoderReferences[0].setZero(sensorSnapshot.positions[0], millis()));

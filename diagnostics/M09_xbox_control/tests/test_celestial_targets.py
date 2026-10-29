@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import sys
 import unittest
+from host_test_support import assert_stream_equivalent
 from unittest import mock
 
 os.environ["SDL_VIDEODRIVER"] = "dummy"
@@ -171,7 +172,7 @@ class TargetSelectorTests(unittest.TestCase):
                 [(.8, [click(1000, 249)]), (1.0, [click(100, 312)]), (1.4, [click(1000, 520)])],
                 until=2.5, real_session=True, gui_entry=True)
         self.assertEqual(result, 0)
-        self.assertEqual(writes, baseline[1])
+        assert_stream_equivalent(self, writes, baseline[1])
         self.assertIn("Sun is below the horizon", log)
 
     def test_preview_failure_and_browsing_during_track_do_not_stop_or_retarget(self):
@@ -192,7 +193,7 @@ class TargetSelectorTests(unittest.TestCase):
                 actions + [(2.5, [click(1000, 249)]), (2.7, [click(330, 460)])],
                 until=4.5, real_session=True, gui_entry=True)
         self.assertEqual(result, 0)
-        self.assertEqual(writes, baseline[1])
+        assert_stream_equivalent(self, writes, baseline[1])
         self.assertEqual(auto.phase, "CELESTIAL_TRACK")
         self.assertEqual(auto.celestial_source, "Sun")
 

@@ -7,12 +7,12 @@ encoder revolution**:
 
 ```bat
 set YAW_ENCODER_RATIO=1
-set PITCH_ENCODER_RATIO=0.06666667
+set PITCH_ENCODER_RATIO=-0.06666667
 ```
 
 Yaw is direct 1:1; pitch is approximately 1:15. The batch file passes these as
 `--yaw-encoder-ratio` and `--pitch-encoder-ratio`. The host multiplies each by 360,
-so firmware receives `ENCODER_CONFIG 360 24.0000012` (approximately 24 degrees
+so firmware receives `ENCODER_CONFIG 360 -24.0000012` (approximately -24 degrees
 per pitch encoder revolution). Location settings remain separate.
 
 The host sends STOP, waits for stopped READY and protocol-2 telemetry, sends the
@@ -22,9 +22,10 @@ STOP. Dry run never sends anything. Configuration clears both zero references;
 you must still use SET NORTH and SET LEVEL after launch/reboot. No motor movement
 or reference capture is part of automatic configuration.
 
-The supplied positive ratios assume raw counts increase with clockwise yaw and
-upward pitch. Verify these directions; use a negative ratio for an axis whose raw
-counts increase in the opposite direction. If you omit both CLI options, geometry
+The configured signs follow the observed mount: yaw counts increase clockwise;
+pitch counts increase downward. Thus pitch uses a negative scale so physical
+upward motion increases the calibrated angle. The same signed scale also sets
+automatic motor direction and response checks; do not negate just the display. If you omit both CLI options, geometry
 can still be configured manually with F2 as described below.
 
 ## Firmware geometry units

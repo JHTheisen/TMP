@@ -90,7 +90,8 @@ class RawCommandUiTests(unittest.TestCase):
         schedule = [(0.9, [key(pygame.K_F2)])] + list(actions)
         schedule.sort(key=lambda action: action[0])
         sent = set()
-        def events():
+        def events(*, pump=False):
+            self.assertFalse(pump)
             if port.ready_at is not None and clock.now >= port.ready_at:
                 port.ready_at = None
                 port.busy = False
@@ -105,6 +106,7 @@ class RawCommandUiTests(unittest.TestCase):
             return result
 
         with tempfile.TemporaryDirectory() as log_dir, \
+             mock.patch.object(xbox_control, "safety_reader", return_value=None), \
              mock.patch.object(pygame.joystick, "get_count", return_value=1), \
              mock.patch.object(pygame.joystick, "Joystick", return_value=joystick), \
              mock.patch.object(pygame.event, "get", side_effect=events), \

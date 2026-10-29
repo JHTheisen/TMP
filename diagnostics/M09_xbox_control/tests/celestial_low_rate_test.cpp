@@ -65,7 +65,7 @@ int main(int argc, char **argv) {
     Wire.encoder.present = Wire1.encoder.present = true;
     setup(); advance(2200);
     for (unsigned i = 0; i < 2; ++i) {
-        simulated::motors[i].physicalSign = 1;
+        simulated::motors[i].physicalSign = i == 0 ? -1 : 1;
         simulated::motors[i].stepPauses = true;
         simulated::motors[i].degreesPerStep = 1.0 /
             (i == 0 ? YAW_TRACK_PULSES_PER_DEG : PITCH_TRACK_PULSES_PER_DEG);
@@ -99,7 +99,7 @@ int main(int argc, char **argv) {
     if (scenario == "stable" || scenario == "minimum_rate" || scenario == "startup_latch") {
         advance(scenario == "minimum_rate" ? 210000 : 120000); active();
         CHECK(simulated::commands.size() == starts);
-        CHECK(yawMotor->getCurrentPosition() > 0 && pitchMotor->getCurrentPosition() > 0);
+        CHECK(yawMotor->getCurrentPosition() < 0 && pitchMotor->getCurrentPosition() > 0);
         if (scenario == "startup_latch") CHECK(starts == 4);
     } else if (scenario == "unexpected_stop") {
         simulated::motors[0].drive = simulated::Drive::IDLE;
@@ -170,7 +170,7 @@ int main(int argc, char **argv) {
             CHECK(millis() - celestialTrackAxes[0].progressAt < CELESTIAL_TRACK_PROGRESS_MS);
             if (scenario == "reverse" || scenario == "pending_period") {
                 CHECK(yawAxis.motion == Motion::TRACK && pitchAxis.motion == Motion::TRACK);
-                CHECK(yawAxis.slewDirection == -1 && pitchAxis.slewDirection == -1);
+                CHECK(yawAxis.slewDirection == 1 && pitchAxis.slewDirection == -1);
                 CHECK(simulated::commands.size() == starts + 2);
                 for (const auto &cmd : simulated::commands) CHECK(!cmd.wasBraking && !cmd.beforeStoppedSample);
             } else {

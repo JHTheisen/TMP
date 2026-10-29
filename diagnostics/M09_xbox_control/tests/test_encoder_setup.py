@@ -1,4 +1,6 @@
 import unittest
+from pathlib import Path
+import re
 
 from encoder_setup import EncoderSetup
 from xbox_control import arguments
@@ -13,6 +15,14 @@ class EncoderSetupTests(unittest.TestCase):
         self.assertIsNone(setup.frame(.1))
         setup.receive("M09 READY")
         return setup.frame(.2)
+
+    def test_shipped_mount_uses_up_positive_pitch_scale(self):
+        launcher = (Path(__file__).resolve().parents[1] / "Start_Gimbal.bat").read_text()
+        yaw = float(re.search(r"set YAW_ENCODER_RATIO=([^\s]+)", launcher).group(1))
+        pitch = float(re.search(r"set PITCH_ENCODER_RATIO=([^\s]+)", launcher).group(1))
+        self.assertEqual(yaw, 1)
+        self.assertAlmostEqual(pitch, -1/15, places=7)
+        self.assertEqual(self.start(EncoderSetup(yaw, pitch)), b"ENCODER_CONFIG 360 -24.0000012\n")
 
     def test_ratios_convert_to_degrees_and_require_ack_then_ready(self):
         setup = EncoderSetup(1, .06666667)

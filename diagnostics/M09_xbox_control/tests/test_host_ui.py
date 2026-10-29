@@ -80,7 +80,8 @@ class HostUiTests(unittest.TestCase):
             return 0.0
         joystick.get_axis.side_effect = axis
         sent = set()
-        def events():
+        def events(*, pump=False):
+            self.assertFalse(pump)
             result = []
             if clock.now > 0.6 and "arm" not in sent:
                 sent.add("arm")
@@ -118,6 +119,7 @@ class HostUiTests(unittest.TestCase):
                 result.append(pygame.event.Event(pygame.QUIT))
             return result
         with tempfile.TemporaryDirectory() as log_dir, \
+             mock.patch.object(xbox_control, "safety_reader", return_value=None), \
              mock.patch.object(pygame.joystick, "get_count", return_value=1), \
              mock.patch.object(pygame.joystick, "Joystick", return_value=joystick), \
              mock.patch.object(pygame.event, "get", side_effect=events), \

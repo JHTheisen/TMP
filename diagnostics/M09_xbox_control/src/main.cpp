@@ -87,6 +87,9 @@ struct ManualAxis {
     double start = 0, best = 0, progress = 0;
 };
 ManualAxis manualYaw, manualPitch, manualCarriage;
+// EncoderReference applies the signed mount scale once: physical UP is positive.
+// This mount needs pitch -24 deg/raw turn; automatic direction composes that
+// same sign below. Never add a display-only negation here.
 double physicalPitch() { return orientation.pitch; }
 HeadingTracker heading;
 Axis yawAxis, pitchAxis;
@@ -130,11 +133,12 @@ void serviceCelestialTracking(uint32_t now, uint32_t sampleAt);
 bool alignmentActive() { return poseActive && (operation == Operation::LEVEL || operation == Operation::NORTH); }
 bool pitchControlRequired() { return !alignmentActive() || operation == Operation::LEVEL; }
 const char *alignmentName() { return operation == Operation::LEVEL ? "LEVEL" : "NORTH"; }
-// Powered AS5600 log 20261008T142253: negative FAS steps decreased raw
-// counts on BOTH axes. Positive steps therefore increase each raw coordinate.
+// Current mount: log 20261028T092214 shows negative FAS yaw steps INCREASE
+// raw/clockwise yaw, superseding the October 8 yaw assumption. Pitch is unchanged:
+// positive FAS pitch steps increase raw counts (negative configured scale).
 // Compose that hardware relationship with the signed encoder scale; do not
 // reuse the manual stick mapping, which deliberately remains unchanged.
-constexpr int ENCODER_RAW_POSITIVE_STEP_SIGN[2] = {1, 1};
+constexpr int ENCODER_RAW_POSITIVE_STEP_SIGN[2] = {-1, 1};
 int axisSlewStepSign(bool pitch) {
     const unsigned index = pitch ? 1 : 0;
     return ENCODER_RAW_POSITIVE_STEP_SIGN[index] *

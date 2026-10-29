@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from host_test_support import assert_stream_equivalent
 from unittest import mock
 
 os.environ["SDL_VIDEODRIVER"] = "dummy"
@@ -52,7 +53,7 @@ class AutoUiTests(unittest.TestCase):
             actions + [(.65, telemetry), (.75, failed), (1.0, stale), (1.9, failed), (2.4, telemetry)],
             until=3.5)
         self.assertEqual(result, 0)
-        self.assertEqual(writes, baseline[1])
+        assert_stream_equivalent(self, writes, baseline[1])
         self.assertEqual(auto.frames, baseline[3].frames)
         self.assertTrue(any(data == b"JOG 0 585 0\n" for _, data in writes))
         self.assertTrue(any(data.startswith(b"KEYMOVE ") for _, data in writes))
@@ -134,7 +135,8 @@ class AutoUiTests(unittest.TestCase):
         schedule.sort(key=lambda item: item[0])
         sent = set()
 
-        def events():
+        def events(*, pump=False):
+            self.assertFalse(pump)
             if port.completion is not None and clock.now >= port.completion[0]:
                 _, ident, port.positions = port.completion
                 port.completion = None
@@ -174,6 +176,7 @@ class AutoUiTests(unittest.TestCase):
             rendered.clear()
 
         with tempfile.TemporaryDirectory() as folder, contextlib.redirect_stdout(io.StringIO()), \
+             mock.patch.object(xbox_control, "safety_reader", return_value=None), \
              mock.patch.object(pygame.joystick, "get_count", return_value=1), \
              mock.patch.object(pygame.joystick, "Joystick", return_value=joystick), \
              mock.patch.object(pygame.event, "get", side_effect=events), \
@@ -325,7 +328,7 @@ class AutoUiTests(unittest.TestCase):
             actions + [(1.9, [pygame.event.Event(pygame.WINDOWFOCUSLOST)]),
                        (2.2, [pygame.event.Event(pygame.WINDOWFOCUSGAINED)])], until=2.5)
         self.assertEqual(result, 0)
-        self.assertEqual(writes, baseline[1])
+        assert_stream_equivalent(self, writes, baseline[1])
         self.assertEqual(auto.phase, baseline[3].phase)
 
     def test_raw_mode_disables_keyframe_buttons(self):

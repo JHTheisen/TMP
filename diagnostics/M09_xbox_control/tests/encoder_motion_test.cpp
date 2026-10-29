@@ -47,7 +47,7 @@ int main(int argc, char **argv) {
     Wire.encoder.present = Wire1.encoder.present = true;
     if (scenario == "bus_recovery") Wire.beginFails = true;
     setup();
-    simulated::motors[0].physicalSign = simulated::motors[1].physicalSign = 1;
+    simulated::motors[0].physicalSign = -1; simulated::motors[1].physicalSign = 1;
     simulated::motors[0].degreesPerStep = 1.0/YAW_TRACK_PULSES_PER_DEG;
     simulated::motors[1].degreesPerStep = 1.0/PITCH_TRACK_PULSES_PER_DEG;
     advance(200);
@@ -123,7 +123,7 @@ int main(int argc, char **argv) {
         if (scenario == "tracking" || scenario == "stall" || scenario == "wrong_direction") {
             yawRate = .02; pitchRate = .015;
             if (scenario == "stall") simulated::motors[0].frozen = true;
-            if (scenario == "wrong_direction") simulated::motors[0].physicalSign = -1;
+            if (scenario == "wrong_direction") simulated::motors[0].physicalSign = 1;
             advance(scenario == "tracking" ? 30000 : 180000);
             if (scenario != "tracking") { CHECK(!celestialActive() || poseStopping); return 0; }
             CHECK(celestialTracking && !poseStopping && fabs(yawAxis.error) < .2 && fabs(pitchAxis.error) < .2);

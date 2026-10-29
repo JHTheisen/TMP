@@ -6,6 +6,16 @@ from pathlib import Path
 import sys
 import time
 import traceback
+import threading
+from functools import wraps
+
+
+def serialized(method):
+    @wraps(method)
+    def call(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return call
 
 
 SLOW_OPERATION_SECONDS = 0.150
@@ -13,6 +23,7 @@ SLOW_OPERATION_SECONDS = 0.150
 
 class SessionLog:
     def __init__(self, directory, settings):
+        self._lock = threading.RLock()
         self.path = None
         self.error = ""
         self._file = None
@@ -48,6 +59,7 @@ class SessionLog:
                 pass
             self._file = None
 
+    @serialized
     def event(self, kind, message):
         if self._file is None:
             return
@@ -81,6 +93,7 @@ class SessionLog:
             self.event("HOST_TIMING", f"operation={operation} elapsed_ms={elapsed * 1000:.1f} "
                        f"threshold_ms={threshold * 1000:.0f}")
 
+    @serialized
     def sampled(self, key, kind, message, now, period, signature=None):
         previous = self._samples.get(key)
         if previous is None or previous[1] != signature or now - previous[0] >= period:
@@ -114,6 +127,7 @@ class SessionLog:
         else:
             self.event("TX_ATTEMPT", command)
 
+    @serialized
     def state(self, session):
         value = (session.state, session.ready, session.pending_stop, session.readiness_note)
         if value != self._state:
@@ -123,6 +137,7 @@ class SessionLog:
     def exception(self, context):
         self.event("EXCEPTION", context + "\n" + traceback.format_exc().rstrip())
 
+    @serialized
     def close(self, result):
         self.event("SESSION", f"exit result={result}")
         if self._file is not None:

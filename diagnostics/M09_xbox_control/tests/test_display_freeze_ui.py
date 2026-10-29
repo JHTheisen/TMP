@@ -75,7 +75,8 @@ class DisplayFreezeUiTests(unittest.TestCase):
         schedule.sort(key=lambda item: item[0])
         sent = set()
         telemetry_sent = set()
-        def events():
+        def events(*, pump=False):
+            self.assertFalse(pump)
             for at, value in ((0.2, 10), (0.9, 20), (1.1, 30)):
                 if clock.now >= at and at not in telemetry_sent:
                     telemetry_sent.add(at)
@@ -108,6 +109,7 @@ class DisplayFreezeUiTests(unittest.TestCase):
             original_flip()
 
         with tempfile.TemporaryDirectory() as log_dir, contextlib.redirect_stdout(io.StringIO()), \
+             mock.patch.object(xbox_control, "safety_reader", return_value=None), \
              mock.patch.object(pygame.joystick, "get_count", return_value=1), \
              mock.patch.object(pygame.joystick, "Joystick", return_value=joystick), \
              mock.patch.object(pygame.event, "get", side_effect=events), \

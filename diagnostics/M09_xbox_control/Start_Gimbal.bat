@@ -4,9 +4,10 @@ cd /d "C:\Users\jhthe\Documents\Arduino\TMP\diagnostics\M09_xbox_control"
 set PYTHONPATH=%CD%\.pio\python_deps
 
 REM Signed output-axis revolutions per encoder revolution.
-REM Yaw 1:1; pitch 1:15. Use a negative value if raw angle increases in reverse.
+REM Yaw 1:1; pitch 1:15. Pitch raw counts increase DOWN on this mount.
+REM Negative pitch scale makes physical UP positive for feedback AND auto direction.
 set YAW_ENCODER_RATIO=1
-set PITCH_ENCODER_RATIO=0.06666667
+set PITCH_ENCODER_RATIO=-0.06666667
 
 "%USERPROFILE%\.platformio\penv\Scripts\python.exe" xbox_control.py ^
 	--port COM9 ^

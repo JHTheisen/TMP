@@ -1,6 +1,6 @@
-// Independent hardware-sign fixture based on the 2026-10-08 powered log:
-// negative FAS motion decreased BOTH raw encoder coordinates. Thus positive
-// FAS motion increases raw counts. Never derive this plant from control signs.
+// Independent hardware-sign fixture: October 28 negative FAS yaw increases
+// raw yaw; pitch retains October 8 positive-FAS/increasing-raw behavior.
+// Never derive this plant from production control signs.
 #include "../src/main.cpp"
 #include <cassert>
 #include <cstdio>
@@ -21,6 +21,7 @@ void advanceDirection(uint32_t ms) {
 int main(int argc, char **argv) {
     assert(argc == 2);
     const std::string scenario = argv[1];
+    const bool mounted = scenario.find("mount_") == 0;
     const bool pitch = scenario.find("pitch") != std::string::npos;
     const bool negative = scenario.find("negative") != std::string::npos;
     const bool precision = scenario.find("precision") != std::string::npos;
@@ -35,17 +36,17 @@ int main(int argc, char **argv) {
     // and 15 shaft turns per pitch cradle turn; yaw's motor reduction is absent.
     for (unsigned n = 0; n < 2; ++n) {
         auto &motor = simulated::motors[n];
-        motor.physicalSign = 1;
+        motor.physicalSign = (n == 0 || mounted) ? -1 : 1;
         motor.degreesPerStep = n ? 1.0/67.2 : 1.0/52.0;
-        simulated::encoderDegreesPerStep[n] = motor.degreesPerStep * (n ? 15.0 : 1.0);
+        simulated::encoderDegreesPerStep[n] = motor.degreesPerStep * (n ? (mounted ? -15.0 : 15.0) : 1.0);
     }
     advanceDirection(200);
     encoderReferences[0].configure(inverted ? -360 : 360);
-    encoderReferences[1].configure(inverted ? -24 : 24);
+    encoderReferences[1].configure((inverted || mounted) ? -24 : 24);
     assert(encoderReferences[0].setZero(sensorSnapshot.positions[0], millis()));
     assert(encoderReferences[1].setZero(sensorSnapshot.positions[1], millis()));
     serviceEncoders();
-    if (scenario == "geometry") {
+    if (scenario == "geometry" || scenario == "mount_geometry") {
         // Independent physical displacements: direct yaw must not be divided
         // by the 9:1 MOTOR gearbox; pitch requires shaft unwrapping through 450°.
         for (unsigned n = 1; n <= 45; ++n) {
@@ -58,13 +59,44 @@ int main(int argc, char **argv) {
         std::puts("PASS encoder direction: geometry");
         return 0;
     }
+    if (scenario == "mount_level") {
+        for (unsigned n=1; n<=5; ++n) {
+            simulated::encoderAxisDisturbance[1] = n;
+            advanceDirection(30);
+        }
+        assert(fabs(physicalPitch() - 5) < .02);
+        beginOrientation(true);
+        advanceDirection(500);
+        assert(physicalPitch() < 5 && pitchMotor->getCurrentPosition() > 0);
+        for (unsigned n=0; n<600 && !commandIdle(); ++n) advanceDirection(100);
+        assert(commandIdle() && fabs(physicalPitch()) <= TOLERANCE_DEG);
+        std::puts("PASS encoder direction: mount_level");
+        return 0;
+    }
+    if (scenario == "mount_reference_limits") {
+        for (unsigned n=1; n<=45; ++n) {
+            simulated::encoderAxisDisturbance[1] = n * 2;
+            advanceDirection(25);
+        }
+        assert(fabs(physicalPitch() - 90) < .02);
+        beginCelestial(91, 0, 10);
+        assert(!celestialActive()); // Absolute physical pitch guard still applies.
+        simulated::serialInput += "SET_LEVEL\n";
+        advanceDirection(100);
+        assert(fabs(physicalPitch()) < .02);
+        simulated::encoderAxisDisturbance[1] = 89;
+        advanceDirection(100);
+        assert(fabs(physicalPitch() + 1) < .02);
+        std::puts("PASS encoder direction: mount_reference_limits");
+        return 0;
+    }
     const int wanted = negative ? -1 : 1;
     const double target = wanted * (precision ? 1.5 : 25.0);
     const bool logGoto = scenario == "log_goto";
     beginCelestial(91, logGoto ? 126.831845 : (track ? 0 : (pitch ? 0 : wrap360(target))),
                    logGoto ? 24.489174 : (track ? 0 : (pitch ? target : 0)));
     assert(celestialActive());
-    if (reversed) simulated::motors[0].physicalSign = -1;
+    if (reversed) simulated::motors[0].physicalSign = 1;
     if (track) {
         advanceDirection(1300);
         assert(celestialTracking);
@@ -94,11 +126,18 @@ int main(int argc, char **argv) {
         assert(!poseStopping && celestialActive());
         const auto &first = simulated::commands.front();
         assert(first.stepPin == (pitch ? 12 : 33));
-        assert((first.steps > 0 ? 1 : -1) == wanted * (inverted ? -1 : 1));
+        assert((first.steps > 0 ? 1 : -1) == wanted * (pitch ? 1 : -1) *
+               ((inverted || (mounted && pitch)) ? -1 : 1));
         assert(first.continuous == !precision);
         for (unsigned n = 0; n < 900 && !celestialTracking && !poseStopping; ++n) advanceDirection(100);
         assert(celestialTracking && !poseStopping);
         assert(fabs(yawAxis.error) <= TOLERANCE_DEG && fabs(pitchAxis.error) <= TOLERANCE_DEG);
+    }
+    if (mounted) {
+        assert(fabs(physicalPitch() - (simulated::motors[1].degrees +
+               simulated::encoderAxisDisturbance[1])) < .03);
+        assert(axisFeedbackStepSign(pitchAxis) == -1);
+        assert(axisFeedbackStepSign(yawAxis) == -1);
     }
     std::printf("PASS encoder direction: %s\n", scenario.c_str());
 }
